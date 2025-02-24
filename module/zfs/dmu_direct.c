@@ -88,7 +88,7 @@ dmu_write_direct_done(zio_t *zio)
 	mutex_enter(&db->db_mtx);
 	ASSERT0P(db->db_buf);
 	ASSERT0P(dr->dt.dl.dr_data);
-	ASSERT0P(db->db.db_data);
+	ASSERT0P(db->db.db_abd);
 	db->db_state = DB_UNCACHED;
 	mutex_exit(&db->db_mtx);
 
@@ -252,7 +252,7 @@ dmu_write_abd_impl(dnode_t *dn, uint64_t offset, uint64_t size,
 }
 
 int
-dmu_write_abd(dnode_t *dn, uint64_t offset, uint64_t size,
+dmu_write_abd_direct(dnode_t *dn, uint64_t offset, uint64_t size,
     abd_t *data, dmu_flags_t flags, dmu_tx_t *tx)
 {
 	return (dmu_write_abd_impl(dn, offset, size, data, flags, tx, NULL));
@@ -319,8 +319,8 @@ dmu_read_abd(dnode_t *dn, uint64_t offset, uint64_t size,
 				 */
 				err = dmu_buf_untransform_direct(db, spa);
 				ASSERT0(err);
-				abd_copy_from_buf_off(data,
-				    (char *)db->db.db_data + boff, aoff, len);
+				abd_copy_off(data, db->db.db_abd, aoff, boff,
+				    len);
 			} else {
 				abd_zero_off(data, aoff, len);
 			}
@@ -404,7 +404,8 @@ dmu_write_abd_copy(dnode_t *dn, uint64_t offset, uint64_t size,
 		abd_t *copy = abd_alloc_for_io(len, B_FALSE);
 
 		abd_copy_off(copy, data, 0, off, len);
-		err = dmu_write_abd(dn, offset + off, len, copy, flags, tx);
+		err = dmu_write_abd_direct(dn, offset + off, len, copy, flags,
+		    tx);
 		abd_free(copy);
 	}
 
