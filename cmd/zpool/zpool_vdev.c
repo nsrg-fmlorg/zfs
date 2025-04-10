@@ -341,15 +341,32 @@ make_leaf_vdev(const char *arg, boolean_t is_primary, uint64_t ashift)
 		/*
 		 * Determine whether this is a device or a file.
 		 */
+#if defined(__FreeBSD__)
+		if (wholedisk) {
+			/* Devices with geom provider only */
+			type = VDEV_TYPE_DISK;
+		} else if (S_ISREG(statbuf.st_mode) ||
+		    S_ISCHR(statbuf.st_mode) || S_ISBLK(statbuf.st_mode)) {
+			/*
+			 * Regular and devfs files, excluding have geom
+			 * providers. The decision, is it geom provider,
+			 * is made by zfs_dev_is_whole_disk() function.
+			 */
+			type = VDEV_TYPE_FILE;
+		}
+#else
 		if (wholedisk || S_ISBLK(statbuf.st_mode)) {
 			type = VDEV_TYPE_DISK;
 		} else if (S_ISREG(statbuf.st_mode)) {
 			type = VDEV_TYPE_FILE;
-		} else {
-			fprintf(stderr, "cannot use '%s': must "
-			    "be a block device or regular file\n", path);
-			return (NULL);
 		}
+#endif
+	}
+
+	if (type == NULL) {
+		fprintf(stderr, "cannot use '%s': must "
+		    "be a block device or regular file\n", path);
+		return (NULL);
 	}
 
 	/*

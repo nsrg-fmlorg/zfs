@@ -245,6 +245,36 @@ zfs_file_seek(zfs_file_t *zfp, loff_t *offp, int whence)
 }
 
 /*
+ * The file IO strategy routine.
+ *
+ * fp -  pointer to file (regular, blk or chr)
+ * arg - data to transfer from/to file, typically ZFS zio
+ *
+ * Used only on FreeBSD kernel side for now.
+ */
+void
+zfs_file_io_strategy(zfs_file_t *fp, void *arg)
+{
+	(void) fp;
+	(void) arg;
+}
+
+/*
+ * The file IO strategy completion routine.
+ *
+ * fp -  pointer to file (regular, blk or chr)
+ * arg - data to transfer from/to file, typically ZFS zio
+ *
+ * Used only on FreeBSD kernel side for now.
+ */
+void
+zfs_file_io_strategy_done(zfs_file_t *fp, void *arg)
+{
+	(void) fp;
+	(void) arg;
+}
+
+/*
  * Get file attributes
  *
  * filp - file pointer
@@ -268,6 +298,8 @@ zfs_file_getattr(zfs_file_t *zfp, zfs_file_attr_t *zfattr)
 
 	zfattr->zfa_size = stat.size;
 	zfattr->zfa_mode = stat.mode;
+	zfattr->zfa_logical_block_size = 0;
+	zfattr->zfa_physical_block_size = 0;
 
 	return (0);
 }
