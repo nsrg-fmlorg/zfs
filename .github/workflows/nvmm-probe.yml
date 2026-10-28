@@ -30,9 +30,10 @@ jobs:
       - uses: vmactions/netbsd-vm@v1
         with:
           release: '11.0'
+          # The image has pkg_add but not pkgin.
           prepare: |
-            /usr/sbin/pkg_info -E pkgin || true
-            pkgin -y install qemu
+            cat /etc/pkg_install.conf || true
+            /usr/sbin/pkg_add qemu || /usr/sbin/pkg_add -v qemu
           run: |
             uname -a
             sysctl hw.model machdep.cpu_brand 2>/dev/null || true
