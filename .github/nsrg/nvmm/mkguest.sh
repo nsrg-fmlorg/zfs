@@ -17,7 +17,8 @@ git clone -q --depth 1 --branch fio-3.42 https://github.com/axboe/fio.git \
     make -s -j"$(nproc)" fio)
 
 kver=$(uname -r)
-cp "/boot/vmlinuz-$kver" "$out/vmlinuz"
+# /boot/vmlinuz-* is mode 600 on the runner.
+sudo cp "/boot/vmlinuz-$kver" "$out/vmlinuz"
 sudo chmod 644 "$out/vmlinuz"
 
 root=$work/root
@@ -40,7 +41,7 @@ modprobe --show-depends virtio_pci virtio_blk 2>/dev/null |
 	echo "$name" >> "$root/lib/mod/order"
     done
 echo "modules: $(tr '\n' ' ' < "$root/lib/mod/order")"
-grep -E '^CONFIG_VIRTIO_(BLK|PCI)=' "/boot/config-$kver" || true
+sudo grep -E '^CONFIG_VIRTIO_(BLK|PCI)=' "/boot/config-$kver" || true
 
 cat > "$root/init" <<'INIT'
 #!/bin/busybox sh
