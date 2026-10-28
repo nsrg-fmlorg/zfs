@@ -1,0 +1,186 @@
+#!/bin/sh
+# iops.sh: does 4k random IOPS scale with the number of vdevs?
+#
+# Pools of 1, 2 and 4 vdevs on RAM-backed block devices (brd if the
+# runner kernel has it, else loop devices over /dev/shm), compared with
+# fio on the same devices without ZFS.  scheduler=auto bypasses the vdev
+# queue only for non-rotational block devices (vdev_should_queue_io()),
+# so file vdevs would not show the bypass at all.  Results go to
+# $OUT/iops.tsv: label, vdevs, scheduler, workload, round, IOPS.
+set -eu
+
+OUT=/var/tmp/iops
+HERE=$(pwd)
+NDEV=4
+DEVSIZE_MB=2048
+RUNTIME=15
+ROUNDS=3
+JOBS=$(nproc)
+mkdir -p "$OUT"
+
+setup_devices() {
+	if sudo modprobe brd rd_nr=$NDEV rd_size=$((DEVSIZE_MB * 1024)) \
+	    2>/dev/null && [ -b /dev/ram0 ]; then
+		DEVS=$(seq 0 $((NDEV - 1)) | sed 's#^#/dev/ram#')
+		echo "devices: brd" | tee -a "$OUT"/env
+	else
+		DEVS=
+		for i in $(seq 0 $((NDEV - 1))); do
+			sudo truncate -s "${DEVSIZE_MB}M" "/dev/shm/iops$i"
+			DEVS="$DEVS $(sudo losetup -f --show "/dev/shm/iops$i")"
+		done
+		echo "devices: loop over /dev/shm" | tee -a "$OUT"/env
+	fi
+	for d in $DEVS; do
+		b=$(basename "$d")
+		echo "$d rotational=$(cat /sys/block/"$b"/queue/rotational)" |
+		    tee -a "$OUT"/env
+	done
+}
+
+# first <n>: the first n devices, space separated
+first() {
+	# shellcheck disable=SC2086
+	printf '%s\n' $DEVS | head -n "$1" | tr '\n' ' '
+}
+
+# fio_iops <rw> <fio args...>: total IOPS of one run
+fio_iops() {
+	rw=$1
+	shift
+	sudo fio --name=t --rw="$rw" --bs=4k --iodepth=32 --ioengine=libaio \
+	    --direct=1 --numjobs="$JOBS" --time_based --runtime=$RUNTIME \
+	    --group_reporting --output-format=json "$@" |
+	    jq '(.jobs[0].read.iops + .jobs[0].write.iops) | floor'
+}
+
+record() {	# record <label> <vdevs> <sched> <rw> <round> <iops>
+	printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$@" | tee -a "$OUT"/iops.tsv
+}
+
+raw_baseline() {
+	for n in 1 2 4; do
+		files=$(first $n | sed 's/ $//; s/ /:/g')
+		for rw in randread randwrite; do
+			r=1
+			while [ $r -le $ROUNDS ]; do
+				record raw $n - $rw $r "$(fio_iops $rw \
+				    --filename="$files")"
+				r=$((r + 1))
+			done
+		done
+	done
+}
+
+# zfs_run <label> <vdevs> <scheduler>
+zfs_run() {
+	label=$1 n=$2 sched=$3
+	# shellcheck disable=SC2046
+	sudo "$HERE"/zpool create -f -o ashift=12 -O compression=off \
+	    -O primarycache=metadata -O recordsize=4k -O atime=off \
+	    iops $(first "$n")
+	for d in $(first "$n"); do
+		sudo "$HERE"/zpool set scheduler="$sched" iops "$d"
+	done
+	sudo fio --name=t --directory=/iops --size=$((1024 / JOBS))M \
+	    --numjobs="$JOBS" --rw=write --bs=1M --end_fsync=1 >/dev/null
+	for rw in randread randwrite; do
+		r=1
+		while [ $r -le $ROUNDS ]; do
+			record "$label" "$n" "$sched" $rw $r "$(fio_iops $rw \
+			    --directory=/iops --size=$((1024 / JOBS))M)"
+			r=$((r + 1))
+		done
+	done
+	sudo "$HERE"/zpool destroy iops
+}
+
+# Count vdev_should_queue_io() answers during one run, to see whether
+# scheduler=auto really bypasses the queue on these devices.
+bypass_check() {
+	command -v bpftrace >/dev/null || { echo "no bpftrace" >> "$OUT"/env; return 0; }
+	# shellcheck disable=SC2046
+	sudo "$HERE"/zpool create -f -o ashift=12 -O compression=off \
+	    -O primarycache=metadata -O recordsize=4k iops $(first $NDEV)
+	sudo fio --name=t --directory=/iops --size=$((1024 / JOBS))M \
+	    --numjobs="$JOBS" --rw=write --bs=1M --end_fsync=1 >/dev/null
+	# The output files belong to the runner user; only the tools need root.
+	# shellcheck disable=SC2024
+	sudo timeout 20 bpftrace -e 'kretprobe:vdev_should_queue_io
+	    { @queued[retval] = count(); }' > "$OUT"/bypass.txt 2>&1 &
+	sleep 3
+	fio_iops randread --directory=/iops --size=$((1024 / JOBS))M >/dev/null
+	wait
+	sudo "$HERE"/zpool destroy iops
+}
+
+# Profile the 4-vdev randread under the default scheduler.
+profile() {
+	# shellcheck disable=SC2046
+	sudo "$HERE"/zpool create -f -o ashift=12 -O compression=off \
+	    -O primarycache=metadata -O recordsize=4k iops $(first $NDEV)
+	sudo fio --name=t --directory=/iops --size=$((1024 / JOBS))M \
+	    --numjobs="$JOBS" --rw=write --bs=1M --end_fsync=1 >/dev/null
+	for rw in randread randwrite; do
+		sudo fio --name=t --rw=$rw --bs=4k --iodepth=32 \
+		    --ioengine=libaio --direct=1 --numjobs="$JOBS" \
+		    --time_based --runtime=40 --directory=/iops \
+		    --size=$((1024 / JOBS))M >/dev/null &
+		sleep 5
+		sudo perf record -a -g -F 499 -o "$OUT"/perf-$rw.data \
+		    -- sleep 10 >/dev/null 2>&1 || true
+		sudo perf report -i "$OUT"/perf-$rw.data --no-children \
+		    --sort symbol --stdio 2>/dev/null | grep -v '^#' |
+		    grep '%' | head -40 > "$OUT"/perf-$rw.txt || true
+		# shellcheck disable=SC2024
+		sudo perf lock contention -ab -- sleep 10 \
+		    > "$OUT"/lock-$rw.txt 2>&1 || true
+		wait
+	done
+	sudo "$HERE"/zpool destroy iops
+}
+
+# Load-time zio taskq variants, 4 vdevs, default scheduler.
+taskq_variants() {
+	for pct in 50 100; do
+		echo "options zfs zio_taskq_batch_pct=$pct" |
+		    sudo tee /etc/modprobe.d/zfs-iops.conf >/dev/null
+		"$HERE"/.github/nsrg/load.sh "$HERE"
+		zfs_run "taskq_pct$pct" 4 auto
+	done
+	sudo rm -f /etc/modprobe.d/zfs-iops.conf
+	"$HERE"/.github/nsrg/load.sh "$HERE"
+}
+
+setup_devices
+raw_baseline
+"$HERE"/.github/nsrg/load.sh "$HERE"
+echo $((1024 * 1024 * 1024)) |
+    sudo tee /sys/module/zfs/parameters/zfs_arc_max >/dev/null
+zfs_run aa 4 auto		# A/A partner of the zfs/4/auto row below
+for sched in auto on off; do
+	for n in 1 2 4; do
+		zfs_run zfs "$n" "$sched"
+	done
+done
+bypass_check
+profile
+taskq_variants
+
+# Summary: mean and min-max IOPS per row.
+awk -F'\t' '
+    { k = $1 "\t" $2 "\t" $3 "\t" $4; s[k] += $6; c[k]++
+      if (!(k in lo) || $6 < lo[k]) lo[k] = $6
+      if (!(k in hi) || $6 > hi[k]) hi[k] = $6 }
+    END { for (k in s) printf "%s\t%d\t%d-%d\n", k, s[k] / c[k], lo[k], hi[k] }' \
+    "$OUT"/iops.tsv | sort > "$OUT"/summary.tsv
+{
+	cat "$OUT"/env
+	printf '\nlabel\tvdevs\tsched\tworkload\tmean IOPS\tmin-max\n'
+	cat "$OUT"/summary.tsv
+	echo; echo "== vdev_should_queue_io() return values"; cat "$OUT"/bypass.txt 2>/dev/null
+	for rw in randread randwrite; do
+		echo; echo "== perf $rw"; head -25 "$OUT"/perf-$rw.txt 2>/dev/null
+		echo; echo "== lock contention $rw"; head -25 "$OUT"/lock-$rw.txt 2>/dev/null
+	done
+} | tee -a "$GITHUB_STEP_SUMMARY"

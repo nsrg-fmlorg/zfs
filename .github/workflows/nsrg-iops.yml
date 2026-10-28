@@ -1,0 +1,35 @@
+name: nsrg-iops
+
+# 4k random IOPS against the number of vdevs, with a profile of where it
+# stops scaling.  Runs only for wip/iops-scaling; see .github/nsrg/iops.sh.
+
+on:
+  push:
+    branches: ['wip/iops-scaling']
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  iops:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - run: .github/nsrg/deps.sh
+      - name: Profiling tools
+        run: |
+          sudo apt-get install -y bpftrace linux-tools-common \
+            "linux-tools-$(uname -r)" || sudo apt-get install -y \
+            bpftrace linux-tools-common linux-tools-azure || true
+          perf --version || true
+          bpftrace --version || true
+      - run: .github/nsrg/build.sh . release
+      - run: .github/nsrg/iops.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: iops
+          path: /var/tmp/iops
