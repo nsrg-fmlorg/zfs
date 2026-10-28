@@ -137,7 +137,10 @@ jobs:
         if: always()
         with:
           name: bench
-          path: /var/tmp/bench
+          path: |
+            /var/tmp/bench
+            /var/tmp/qd1
+          if-no-files-found: ignore
 
   measure:
     # Steps, not the job, are gated: hashFiles() is not available in a
