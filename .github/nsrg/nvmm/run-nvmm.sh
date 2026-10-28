@@ -5,7 +5,9 @@
 # execname is p_comm, cut to MAXCOMLEN (16): "qemu-system-x86_".
 set -u
 g=$1
-truncate -s 1G "$g/disk.img"
+# NetBSD has no truncate(1).
+dd if=/dev/zero of="$g/disk.img" bs=1m count=0 seek=1024 2>/dev/null
+ls -l "$g/disk.img"
 for m in solaris dtrace dtrace_systrace systrace fbt sdt; do
 	modload "$m" 2>/dev/null || true
 done
@@ -29,4 +31,5 @@ timeout 180 qemu-system-x86_64 -accel nvmm -smp 1 -m 512 \
 echo "qemu exit: $? after $(( $(date +%s) - start ))s"
 kill -INT "$dpid" 2>/dev/null; wait "$dpid" 2>/dev/null
 cat "$g/nvmm.dtrace" 2>/dev/null || echo "no dtrace output"
+tail -n 40 "$g/nvmm.serial" 2>/dev/null || true
 rm -f "$g/disk.img"

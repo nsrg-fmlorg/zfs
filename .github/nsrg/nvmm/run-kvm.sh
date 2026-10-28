@@ -16,3 +16,5 @@ timeout 180 qemu-system-x86_64 -enable-kvm -cpu host -smp 1 -m 512 \
     -append "console=ttyS0 quiet" \
     -drive "file=$g/disk.img,if=virtio,format=raw"
 echo "after:  $(snap)"
+sudo ls /sys/kernel/debug/kvm | head -20
+tail -n 40 "$g/kvm.serial"

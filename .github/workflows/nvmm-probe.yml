@@ -3,7 +3,10 @@ name: nvmm-probe
 # QD=1 virtio-blk cost under NVMM, against KVM on the same runner.
 # NVMM loads nested only when the runner is AMD (on the Intel runners
 # modload nvmm answers "Not supported"), and the runner CPU cannot be
-# chosen, so three identical jobs start and those on Intel stop early.
+# chosen, so several identical jobs start and those on Intel stop
+# early.  Starting a guest has so far left the NetBSD VM unreachable
+# over ssh; 10.1 runs beside 11.0 to see whether that is release
+# specific, and anyvm's debug output keeps the VM console.
 
 on:
   push:
@@ -19,7 +22,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        try: [1, 2, 3]
+        release: ['10.1', '11.0']
+        try: [1, 2]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -49,8 +53,9 @@ jobs:
       - uses: vmactions/netbsd-vm@v1
         if: steps.cpu.outputs.amd == 'true'
         with:
-          release: '11.0'
+          release: ${{ matrix.release }}
           cpu: 2
+          debug: true
           # The image has pkg_add but not pkgin, and no X sets, which the
           # qemu package's SDL2 dependency pulls in.  (Paths below are in
           # the NetBSD guest.)
