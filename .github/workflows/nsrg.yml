@@ -39,9 +39,21 @@ jobs:
       - run: .github/nsrg/build.sh . release
       - run: make -s -j"$(nproc)" checkstyle
       - run: make -s -j"$(nproc)" lint
-      - run: >
+      - id: checkabi
+        run: >
           docker run -v "$PWD":/source ghcr.io/openzfs/libabigail
           make -s -j"$(nproc)" checkabi
+      # As upstream's checkstyle job: hand back the regenerated ABI
+      # files when the check fails, to commit if the change is intended.
+      - if: failure() && steps.checkabi.outcome == 'failure'
+        run: >
+          docker run -v "$PWD":/source ghcr.io/openzfs/libabigail
+          make -s -j"$(nproc)" storeabi
+      - if: failure() && steps.checkabi.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: abi
+          path: lib/*/*.abi
 
   strict:
     runs-on: ubuntu-24.04
