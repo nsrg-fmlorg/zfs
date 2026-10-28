@@ -41,17 +41,16 @@ zfs_slack_compress_buf(void *src, void *dst, size_t s_len, size_t d_len,
 	ASSERT3U(s_len, >, 0);
 	ASSERT0(P2PHASE(s_len, sizeof (uint64_t)));
 
-	uint64_t *buf = (uint64_t *)src;
+	const uint64_t *buf = src;
 
-	int p = (s_len / sizeof (uint64_t)) - 1;
-	for (; p >= 0; p--)
-		if (buf[p] != 0)
-			break;
+	size_t n = s_len / sizeof (uint64_t);
+	while (n > 0 && buf[n - 1] == 0)
+		n--;
 
-	if (p < 0)
+	if (n == 0)
 		return (s_len);
 
-	size_t c_len = (p + 1) * sizeof (uint64_t);
+	size_t c_len = n * sizeof (uint64_t);
 	if (c_len > d_len)
 		return (s_len);
 
@@ -64,10 +63,17 @@ zfs_slack_decompress_buf(void *src, void *dst, size_t s_len, size_t d_len,
     int level)
 {
 	(void) level;
-	ASSERT3U(d_len, >=, s_len);
+
+	/*
+	 * A physical size larger than the logical one can only come from a
+	 * damaged block pointer.  Refuse it as zle does; an ASSERT would let
+	 * a non-debug build copy past the end of dst.
+	 */
+	if (s_len > d_len)
+		return (-1);
+
 	memcpy(dst, src, s_len);
-	if (d_len > s_len)
-		memset(dst+s_len, 0, d_len-s_len);
+	memset((uchar_t *)dst + s_len, 0, d_len - s_len);
 	return (0);
 }
 
