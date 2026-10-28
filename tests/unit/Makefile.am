@@ -24,6 +24,7 @@ UNIT_TESTS = \
 	%D%/test_nvpair \
 	%D%/test_backtrace \
 	%D%/test_timer \
+	%D%/test_slack \
 	%D%/test_zfs_file
 noinst_PROGRAMS = $(UNIT_TESTS)
 
@@ -165,6 +166,19 @@ nodist_%C%_test_nvpair_SOURCES = \
 	%D%/test_zfs_file.c
 
 %C%_test_zfs_file_LDADD = \
+	libunit.la \
+	libspl.la
+
+
+%C%_test_slack_CFLAGS = $(AM_CFLAGS)
+
+nodist_%C%_test_slack_SOURCES = \
+	module/zfs/slack.c
+
+%C%_test_slack_SOURCES = \
+	%D%/test_slack.c
+
+%C%_test_slack_LDADD = \
 	libunit.la \
 	libspl.la
 
