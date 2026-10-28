@@ -39,8 +39,8 @@
 #include <sys/dsl_dir.h>
 #include <sys/dsl_pool.h>
 #include <sys/dsl_synctask.h>
+#include <sys/abd.h>
 #include <sys/vdev_impl.h>
-#include <sys/vdev_os.h>
 #include <sys/zfs_ioctl.h>
 #include <sys/zap.h>
 #include <sys/zio_checksum.h>
@@ -50,7 +50,9 @@
 #include <sys/buf.h>
 #include <sys/disk.h>
 #include <sys/file.h>
+#include <sys/conf.h>
 #include <geom/geom.h>
+#include <vm/vm_page.h>
 #include <sys/stat.h>
 
 SYSCTL_DECL(_vfs_zfs_vdev);
@@ -71,6 +73,7 @@ zfs_file_open(const char *path, int flags, int mode, cred_t *cr,
 	struct vnode *vp;
 	struct file *fp;
 	struct nameidata nd;
+	boolean_t creating = (flags & O_CREAT) != 0;
 	int error;
 
 	td = curthread;
@@ -105,12 +108,17 @@ zfs_file_open(const char *path, int flags, int mode, cred_t *cr,
 		finit_vnode(fp, flags, NULL, &vnops);
 	}
 	VOP_UNLOCK(vp);
-	if (vp->v_type != VREG && !IS_DEVVP(vp)) {
+	/*
+	 * A character device is accepted for a file vdev on a device with
+	 * no GEOM provider.  Nothing creates or truncates one: the cache
+	 * file is written with O_CREAT, and must not land on a device.
+	 */
+	if (vp->v_type != VREG && (vp->v_type != VCHR || creating)) {
 		zfs_file_close(fp);
 		return (SET_ERROR(EACCES));
 	}
 
-	if (!IS_DEVVP(vp) && flags & O_TRUNC) {
+	if (vp->v_type == VREG && flags & O_TRUNC) {
 		error = fo_truncate(fp, 0, cr, td);
 		if (error != 0) {
 			zfs_file_close(fp);
@@ -258,6 +266,29 @@ zfs_file_seek(zfs_file_t *zfp, loff_t *offp, int whence)
 }
 
 /*
+ * I/O to a device node with no GEOM provider, for vdev_file.
+ *
+ * GEOM's g_disk normally sits between ZFS and the driver.  Calling the
+ * driver's d_strategy directly means doing here what g_disk would:
+ * setting bio_bcount, which drivers read for the transfer length
+ * (nvme_ns_bio_process() sizes BIO_DELETE from it); splitting reads and
+ * writes at si_iosize_max, which d_strategy does not do for us (nvme
+ * splits only at the namespace boundary); and sending unmapped bios only
+ * to a device that sets SI_UNMAPPED, as physio() checks.
+ *
+ * One zio becomes one or more bios sharing a zfs_file_io_t, which
+ * zio->io_bio points at until vdev_file_io_done() releases the buffer.
+ */
+typedef struct zfs_file_io {
+	zio_t		*zfi_zio;
+	void		*zfi_data;	/* borrowed linear buffer or NULL */
+	vm_page_t	*zfi_ma;	/* unmapped pages, or NULL */
+	int		zfi_ma_n;
+	uint_t		zfi_pending;	/* bios still outstanding */
+	uint_t		zfi_error;	/* first error seen */
+} zfs_file_io_t;
+
+/*
  * Callback to translate the ABD segment into array of physical pages.
  */
 static int
@@ -279,44 +310,6 @@ zfs_file_fill_unmap_cb(void *buf, size_t len, void *priv)
 		addr += PAGE_SIZE;
 	} while (addr < end);
 	return (0);
-}
-
-static void
-zfs_file_io_intr(struct bio *bp)
-{
-	vdev_t *vd;
-	zio_t *zio;
-
-	zio = bp->bio_caller1;
-	vd = zio->io_vd;
-	zio->io_error = bp->bio_error;
-	if (zio->io_error == 0 && bp->bio_resid != 0)
-		zio->io_error = SET_ERROR(EIO);
-
-	switch (zio->io_error) {
-	case ENXIO:
-		if (!vd->vdev_remove_wanted) {
-			if (bp->bio_to->error != 0) {
-				vd->vdev_remove_wanted = B_TRUE;
-				spa_async_request(zio->io_spa,
-				    SPA_ASYNC_REMOVE);
-			} else if (!vd->vdev_delayed_close) {
-				vd->vdev_delayed_close = B_TRUE;
-			}
-		}
-		break;
-	}
-
-	/*
-	 * We have to split bio freeing into two parts, because the ABD code
-	 * cannot be called in this context and vdev_op_io_done is not called
-	 * for ZIO_TYPE_FLUSH zio-s.
-	 */
-	if (zio->io_type != ZIO_TYPE_READ && zio->io_type != ZIO_TYPE_WRITE) {
-		g_destroy_bio(bp);
-		zio->io_bio = NULL;
-	}
-	zio_delay_interrupt(zio);
 }
 
 struct zfs_file_check_unmapped_cb_state {
@@ -343,23 +336,21 @@ zfs_file_check_unmapped_cb(void *buf, size_t len, void *priv)
 }
 
 /*
- * Check whether we can use unmapped I/O for this ZIO on this device to
- * avoid data copying between scattered and/or gang ABD buffer and linear.
+ * Return the number of pages to describe the zio's buffer as an unmapped
+ * bio, or 0 to use a linear buffer.  As in vdev_geom_check_unmapped(),
+ * plus the device's own consent.
  */
 static int
-zfs_file_check_unmapped(zio_t *zio)
+zfs_file_check_unmapped(zio_t *zio, struct cdev *dev)
 {
 	struct zfs_file_check_unmapped_cb_state s;
 
-	/* If unmapped I/O is administratively disabled, respect that. */
-	if (!unmapped_buf_allowed)
+	if (!unmapped_buf_allowed || (dev->si_flags & SI_UNMAPPED) == 0)
 		return (0);
 
-	/* If the buffer is already linear, then nothing to do here. */
 	if (abd_is_linear(zio->io_abd))
 		return (0);
 
-	/* Check the buffer chunks sizes/alignments and count pages. */
 	s.pages = s.end = 0;
 	if (abd_iterate_func(zio->io_abd, 0, zio->io_size,
 	    zfs_file_check_unmapped_cb, &s))
@@ -367,152 +358,202 @@ zfs_file_check_unmapped(zio_t *zio)
 	return (s.pages);
 }
 
-void
-zfs_file_io_strategy(zfs_file_t *fp, void *arg)
+static void
+zfs_file_io_free(zfs_file_io_t *zfi)
 {
-	vdev_t *vd;
+	if (zfi->zfi_ma != NULL)
+		free(zfi->zfi_ma, M_DEVBUF);
+	kmem_free(zfi, sizeof (*zfi));
+}
+
+static void
+zfs_file_io_intr(struct bio *bp)
+{
+	zfs_file_io_t *zfi = bp->bio_caller1;
+	zio_t *zio = zfi->zfi_zio;
+	uint_t error = (uint_t)bp->bio_error;
+
+	if (error == 0 && bp->bio_resid != 0)
+		error = SET_ERROR(EIO);
+	if (error != 0)
+		(void) atomic_cmpset_int(&zfi->zfi_error, 0, error);
+	g_destroy_bio(bp);
+
+	if (atomic_fetchadd_int(&zfi->zfi_pending, -1) != 1)
+		return;
+
+	zio->io_error = (int)zfi->zfi_error;
+
+	/*
+	 * There is no GEOM orphan event to tell a vanished device from a
+	 * failed request (vdev_geom checks the provider's error, which a
+	 * bio sent straight to d_strategy does not have: bio_to is NULL).
+	 * Close and reopen later; zfs_file_io_strategy() asks for removal
+	 * once the cdev itself is gone.
+	 */
+	if (zio->io_error == ENXIO && !zio->io_vd->vdev_remove_wanted)
+		zio->io_vd->vdev_delayed_close = B_TRUE;
+
+	/*
+	 * vdev_op_io_done is not called for ZIO_TYPE_FLUSH, and the ABD code
+	 * cannot be called in this context, so a read or write keeps its
+	 * buffer until zfs_file_io_strategy_done().
+	 */
+	if (zio->io_type != ZIO_TYPE_READ && zio->io_type != ZIO_TYPE_WRITE) {
+		zio->io_bio = NULL;
+		zfs_file_io_free(zfi);
+	}
+	zio_delay_interrupt(zio);
+}
+
+static struct bio *
+zfs_file_bio(zfs_file_io_t *zfi, struct cdev *dev, uint_t cmd, off_t offset,
+    off_t length)
+{
+	struct bio *bp = g_alloc_bio();
+
+	bp->bio_cmd = cmd;
+	bp->bio_dev = dev;
+	bp->bio_offset = offset;
+	bp->bio_length = bp->bio_bcount = length;
+	bp->bio_caller1 = zfi;
+	bp->bio_done = zfs_file_io_intr;
+	return (bp);
+}
+
+void
+zfs_file_io_strategy(zfs_file_t *zfp, void *arg)
+{
+	struct file *fp = zfp;
 	zio_t *zio = arg;
-	struct vdev_data *vdp;
-	struct bio *bp;
+	vdev_t *vd = zio->io_vd;
 	struct cdevsw *csw;
 	struct cdev *dev;
 	int ref;
-
-	vd = zio->io_vd;
-
-	if (zio->io_type == ZIO_TYPE_FLUSH) {
-		/* XXPOLICY */
-		if (!vdev_readable(vd)) {
-			zio->io_error = SET_ERROR(ENXIO);
-			zio_interrupt(zio);
-			return;
-		}
-
-		if (zfs_nocacheflush || zfs_file_bio_flush_disable) {
-			zio_execute(zio);
-			return;
-		}
-
-		if (vd->vdev_nowritecache) {
-			zio->io_error = SET_ERROR(ENOTSUP);
-			zio_execute(zio);
-			return;
-		}
-	} else if (zio->io_type == ZIO_TYPE_TRIM) {
-		if (zfs_file_bio_delete_disable) {
-			zio_execute(zio);
-			return;
-		}
-	}
 
 	ASSERT(zio->io_type == ZIO_TYPE_READ ||
 	    zio->io_type == ZIO_TYPE_WRITE ||
 	    zio->io_type == ZIO_TYPE_TRIM ||
 	    zio->io_type == ZIO_TYPE_FLUSH);
 
-	vdp = vd->vdev_tsd;
-	if (vdp == NULL) {
-		zio->io_error = SET_ERROR(ENXIO);
-		zio_interrupt(zio);
+	if ((zio->io_type == ZIO_TYPE_FLUSH && zfs_file_bio_flush_disable) ||
+	    (zio->io_type == ZIO_TYPE_TRIM && zfs_file_bio_delete_disable)) {
+		zio_execute(zio);
+		return;
+	}
+	if (zio->io_type == ZIO_TYPE_FLUSH && vd->vdev_nowritecache) {
+		zio->io_error = SET_ERROR(ENOTSUP);
+		zio_execute(zio);
 		return;
 	}
 
-	bp = g_alloc_bio();
-	bp->bio_caller1 = zio;
-	switch (zio->io_type) {
-	case ZIO_TYPE_READ:
-	case ZIO_TYPE_WRITE:
-		zio->io_target_timestamp = zio_handle_io_delay(zio);
-		bp->bio_offset = zio->io_offset;
-		bp->bio_bcount = bp->bio_length = zio->io_size;
-		if (zio->io_type == ZIO_TYPE_READ)
-			bp->bio_cmd = BIO_READ;
-		else
-			bp->bio_cmd = BIO_WRITE;
-
-		/*
-		 * If possible, represent scattered and/or gang ABD buffer
-		 * as an array of physical pages.  It allows to satisfy
-		 * requirement of virtually contiguous buffer without copying.
-		 */
-		int pgs = zfs_file_check_unmapped(zio);
-		if (pgs > 0) {
-			bp->bio_ma = malloc(sizeof (struct vm_page *) * pgs,
-			    M_DEVBUF, M_WAITOK);
-			bp->bio_ma_n = 0;
-			bp->bio_ma_offset = 0;
-			abd_iterate_func(zio->io_abd, 0, zio->io_size,
-			    zfs_file_fill_unmap_cb, bp);
-			bp->bio_data = unmapped_buf;
-			bp->bio_flags |= BIO_UNMAPPED;
-		} else {
-			if (zio->io_type == ZIO_TYPE_READ) {
-				bp->bio_data = abd_borrow_buf(zio->io_abd,
-				    zio->io_size);
-			} else {
-				bp->bio_data = abd_borrow_buf_copy(zio->io_abd,
-				    zio->io_size);
-			}
-		}
-		break;
-	case ZIO_TYPE_TRIM:
-		bp->bio_cmd = BIO_DELETE;
-		bp->bio_data = NULL;
-		bp->bio_offset = zio->io_offset;
-		bp->bio_length = zio->io_size;
-		break;
-	case ZIO_TYPE_FLUSH:
-		bp->bio_cmd = BIO_FLUSH;
-		bp->bio_data = NULL;
-		bp->bio_offset = vd->vdev_asize;
-		bp->bio_length = 0;
-		break;
-	default:
-		panic("invalid zio->io_type: %d\n", zio->io_type);
-	}
-	bp->bio_done = zfs_file_io_intr;
-	zio->io_bio = bp;
 	csw = devvn_refthread(fp->f_vnode, &dev, &ref);
 	if (csw == NULL) {
+		/* The cdev has been destroyed: the device is gone. */
+		if (!vd->vdev_remove_wanted) {
+			vd->vdev_remove_wanted = B_TRUE;
+			spa_async_request(zio->io_spa, SPA_ASYNC_REMOVE);
+		}
 		zio->io_error = SET_ERROR(ENXIO);
 		zio_interrupt(zio);
 		return;
 	}
-	bp->bio_dev = dev;
-	csw->d_strategy(bp);
+
+	zfs_file_io_t *zfi = kmem_zalloc(sizeof (*zfi), KM_SLEEP);
+	zfi->zfi_zio = zio;
+	zio->io_bio = zfi;
+
+	if (zio->io_type == ZIO_TYPE_TRIM || zio->io_type == ZIO_TYPE_FLUSH) {
+		struct bio *bp = (zio->io_type == ZIO_TYPE_TRIM) ?
+		    zfs_file_bio(zfi, dev, BIO_DELETE, zio->io_offset,
+		    zio->io_size) :
+		    zfs_file_bio(zfi, dev, BIO_FLUSH, vd->vdev_asize, 0);
+		zfi->zfi_pending = 1;
+		csw->d_strategy(bp);
+		dev_relthread(dev, ref);
+		return;
+	}
+
+	uint_t cmd = (zio->io_type == ZIO_TYPE_READ) ? BIO_READ : BIO_WRITE;
+	/*
+	 * physio() falls back to DFLTPHYS for a driver that leaves
+	 * si_iosize_max unset.  Pieces are whole sectors of the vdev.
+	 */
+	off_t maxio = (dev->si_iosize_max >= PAGE_SIZE) ?
+	    dev->si_iosize_max : DFLTPHYS;
+	maxio = MIN(maxio, (off_t)maxphys);
+	maxio = MAX(P2ALIGN_TYPED(maxio, 1LL << vd->vdev_ashift, off_t),
+	    1LL << vd->vdev_ashift);
+	zio->io_target_timestamp = zio_handle_io_delay(zio);
+
+	/*
+	 * Represent a scattered ABD as an array of pages when the device
+	 * takes unmapped I/O and one bio carries it.  Splitting a page
+	 * array is left to a later change; a split goes through a linear
+	 * buffer.
+	 */
+	int pgs = 0;
+	if (zio->io_size <= (uint64_t)maxio)
+		pgs = zfs_file_check_unmapped(zio, dev);
+	if (pgs > 0) {
+		struct bio *bp = zfs_file_bio(zfi, dev, cmd, zio->io_offset,
+		    zio->io_size);
+		bp->bio_ma = zfi->zfi_ma = malloc(sizeof (vm_page_t) * pgs,
+		    M_DEVBUF, M_WAITOK);
+		zfi->zfi_ma_n = pgs;
+		bp->bio_ma_n = 0;
+		bp->bio_ma_offset = 0;
+		abd_iterate_func(zio->io_abd, 0, zio->io_size,
+		    zfs_file_fill_unmap_cb, bp);
+		bp->bio_data = unmapped_buf;
+		bp->bio_flags |= BIO_UNMAPPED;
+		zfi->zfi_pending = 1;
+		csw->d_strategy(bp);
+		dev_relthread(dev, ref);
+		return;
+	}
+
+	zfi->zfi_data = (cmd == BIO_READ) ?
+	    abd_borrow_buf(zio->io_abd, zio->io_size) :
+	    abd_borrow_buf_copy(zio->io_abd, zio->io_size);
+
+	/*
+	 * Count every piece before sending any, so that an early completion
+	 * cannot see the count reach zero while pieces remain unsent.
+	 */
+	uint_t nbios = (uint_t)howmany(zio->io_size, maxio);
+	zfi->zfi_pending = nbios;
+	for (uint_t i = 0; i < nbios; i++) {
+		off_t done = (off_t)i * maxio;
+		struct bio *bp = zfs_file_bio(zfi, dev, cmd,
+		    (off_t)zio->io_offset + done,
+		    MIN(maxio, (off_t)zio->io_size - done));
+		bp->bio_data = (char *)zfi->zfi_data + done;
+		csw->d_strategy(bp);
+	}
 	dev_relthread(dev, ref);
 }
 
 void
 zfs_file_io_strategy_done(zfs_file_t *fp, void *arg)
 {
+	(void) fp;
 	zio_t *zio = arg;
-	struct bio *bp = zio->io_bio;
+	zfs_file_io_t *zfi = zio->io_bio;
 
-	if (zio->io_type != ZIO_TYPE_READ && zio->io_type != ZIO_TYPE_WRITE) {
-		ASSERT3P(bp, ==, NULL);
-		return;
-	}
+	ASSERT(zio->io_type == ZIO_TYPE_READ || zio->io_type == ZIO_TYPE_WRITE);
 
-	if (bp == NULL) {
-		ASSERT3S(zio->io_error, ==, ENXIO);
-		return;
-	}
-
-	if (bp->bio_ma != NULL) {
-		free(bp->bio_ma, M_DEVBUF);
-	} else {
+	if (zfi->zfi_data != NULL) {
 		if (zio->io_type == ZIO_TYPE_READ) {
-			abd_return_buf_copy(zio->io_abd, bp->bio_data,
+			abd_return_buf_copy(zio->io_abd, zfi->zfi_data,
 			    zio->io_size);
 		} else {
-			abd_return_buf(zio->io_abd, bp->bio_data,
+			abd_return_buf(zio->io_abd, zfi->zfi_data,
 			    zio->io_size);
 		}
 	}
-
-	g_destroy_bio(bp);
 	zio->io_bio = NULL;
+	zfs_file_io_free(zfi);
 }
 
 int
@@ -549,8 +590,6 @@ zfs_file_getattr(zfs_file_t *zfp, zfs_file_attr_t *zfattr)
 	    td->td_ucred, td);
 	if (rc) {
 		zfs_dbgmsg("zfs file open: cannot get media size");
-		vrele(fp->f_vnode);
-		fdrop(fp, curthread);
 		return (SET_ERROR(EINVAL));
 	}
 
@@ -560,8 +599,6 @@ zfs_file_getattr(zfs_file_t *zfp, zfs_file_attr_t *zfattr)
 	    td->td_ucred, td);
 	if (rc) {
 		zfs_dbgmsg("zfs file open: cannot get sector size");
-		vrele(fp->f_vnode);
-		fdrop(fp, curthread);
 		return (SET_ERROR(EINVAL));
 	}
 
