@@ -480,7 +480,8 @@ zfs_prop_init(void)
 	    "default | full | geom | dev | none", "VOLMODE", volmode_table,
 	    sfeatures);
 	zprop_register_index(ZFS_PROP_DIRECT, "direct",
-	    ZFS_DIRECT_STANDARD, PROP_INHERIT, ZFS_TYPE_FILESYSTEM,
+	    ZFS_DIRECT_STANDARD, PROP_INHERIT,
+	    ZFS_TYPE_FILESYSTEM | ZFS_TYPE_VOLUME,
 	    "disabled | standard | always", "DIRECT", direct_table,
 	    sfeatures);
 

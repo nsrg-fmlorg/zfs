@@ -81,9 +81,9 @@ int zfs_bclone_wait_dirty = 1;
 /*
  * Enable Direct I/O. If this setting is 0, then all I/O requests will be
  * directed through the ARC acting as though the dataset property direct was
- * set to disabled.
+ * set to disabled.  zvols honour it too; see sys/uio_impl.h.
  */
-static int zfs_dio_enabled = 1;
+int zfs_dio_enabled = 1;
 
 /*
  * Strictly enforce alignment for Direct I/O requests, returning EINVAL
