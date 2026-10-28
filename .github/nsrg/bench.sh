@@ -44,8 +44,8 @@ measure() {
 		    --numjobs=4 --time_based --runtime=30 --group_reporting \
 		    --output-format=json |
 		    jq -r --arg l "$label" --arg w "$w" '[$l, $w,
-		    (.jobs[0].read.bw_bytes + .jobs[0].write.bw_bytes)
-		    / 1048576 | floor] | @tsv' >> "$OUT"/raw.tsv
+		    ((.jobs[0].read.bw_bytes + .jobs[0].write.bw_bytes)
+		    / 1048576 | floor)] | @tsv' >> "$OUT"/raw.tsv
 	done
 
 	sudo "$src"/zpool destroy bench

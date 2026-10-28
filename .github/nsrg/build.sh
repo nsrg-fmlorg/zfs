@@ -1,9 +1,13 @@
 #!/bin/sh
-# build.sh <srcdir> <release|debug|sanitize>
+# build.sh <srcdir> <release|debug|sanitize> [make target]
 #
 # debug turns on ASSERTs and, through DEBUG_CFLAGS in config/zfs-build.m4,
 # -Werror.  The Ubuntu kernel is built with gcc, so under clang only the
 # userspace half is built; the module would not load anyway.
+#
+# Under the sanitizers upstream's zdb.c does not build with -Werror
+# (-Warray-bounds on ddt_stat_t), so the sanitize job names ztest as the
+# target and builds only what that needs.
 set -eu
 cd "$1"
 case $2 in
@@ -17,4 +21,4 @@ esac
 sh autogen.sh >/dev/null
 # shellcheck disable=SC2086
 ./configure -q $opts
-make -s -j"$(nproc)"
+make -s -j"$(nproc)" ${3:+"$3"}

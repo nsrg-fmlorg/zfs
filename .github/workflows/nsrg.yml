@@ -30,7 +30,9 @@ concurrency:
 
 jobs:
   checkstyle:
-    runs-on: ubuntu-24.04
+    # Same release as upstream's checkstyle job: 24.04's cppcheck stops
+    # on lib/libspl/include/sys/isa_defs.h.
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - run: .github/nsrg/deps.sh checkstyle
@@ -74,7 +76,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: .github/nsrg/deps.sh
-      - run: .github/nsrg/build.sh . sanitize
+      - run: .github/nsrg/build.sh . sanitize ztest
       - run: .github/nsrg/ztest.sh
 
   zts:
