@@ -462,6 +462,7 @@ struct vdev {
 	uint64_t	vdev_slow_io_n;
 	uint64_t	vdev_slow_io_t;
 	uint64_t	vdev_scheduler; /* control how I/Os are submitted */
+	uint64_t	vdev_max_active; /* 0: zfs_vdev_max_active */
 };
 
 #define	VDEV_PAD_SIZE		(8 << 10)

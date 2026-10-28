@@ -11,7 +11,7 @@
 .\"
 .\" Copyright (c) 2021, 2025, Klara, Inc.
 .\"
-.Dd July 23, 2024
+.Dd October 29, 2026
 .Dt VDEVPROPS 7
 .Os
 .
@@ -245,6 +245,22 @@ Never adds I/O requests to the vdev queue.
 This is not recommended for vdevs backed by spinning disks as it could
 result in starvation.
 .El
+.It Sy max_active Ns = Ns Ar ios
+The most I/O requests ZFS keeps outstanding to this vdev at once, across all
+I/O classes.
+When set on a top-level vdev it applies to the leaf vdevs below it
+that do not set their own.
+The default of 0 leaves the limit to the
+.Sy zfs_vdev_max_active
+module parameter, see
+.Xr zfs 4 .
+The per-class limits, such as
+.Sy zfs_vdev_sync_read_max_active ,
+still apply within it.
+Like them, it only limits I/O that goes through the vdev queue, so it has no
+effect on a vdev whose
+.Sy scheduler
+does not queue I/O.
 .El
 .Ss User Properties
 In addition to the standard native properties, ZFS supports arbitrary user

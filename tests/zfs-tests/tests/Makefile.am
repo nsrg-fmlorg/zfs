@@ -1400,6 +1400,7 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS += \
 	functional/cli_root/zpool/setup.ksh \
 	functional/cli_root/zpool_set/vdev_set_001_pos.ksh \
 	functional/cli_root/zpool_set/vdev_set_scheduler.ksh \
+	functional/cli_root/zpool_set/vdev_set_max_active.ksh \
 	functional/cli_root/zpool_set/vdev_set_allocating.ksh \
 	functional/cli_root/zpool_set/vdev_set_path.ksh \
 	functional/cli_root/zpool_set/zpool_set_common.kshlib \

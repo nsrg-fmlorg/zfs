@@ -516,6 +516,9 @@ vdev_prop_init(void)
 	zprop_register_number(VDEV_PROP_CHECKSUM_T, "checksum_t", UINT64_MAX,
 	    PROP_DEFAULT, ZFS_TYPE_VDEV, "<seconds>", "CKSUM_T", B_FALSE,
 	    sfeatures);
+	zprop_register_number(VDEV_PROP_MAX_ACTIVE, "max_active", 0,
+	    PROP_DEFAULT, ZFS_TYPE_VDEV, "<ios>", "MAX_ACTIVE", B_FALSE,
+	    sfeatures);
 	zprop_register_number(VDEV_PROP_IO_N, "io_n", UINT64_MAX,
 	    PROP_DEFAULT, ZFS_TYPE_VDEV, "<events>", "IO_N", B_FALSE,
 	    sfeatures);

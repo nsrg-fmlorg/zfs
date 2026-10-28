@@ -769,6 +769,7 @@ vdev_alloc_common(spa_t *spa, uint_t id, uint64_t guid, vdev_ops_t *ops)
 	vd->vdev_slow_io_t = vdev_prop_default_numeric(VDEV_PROP_SLOW_IO_T);
 
 	vd->vdev_scheduler = vdev_prop_default_numeric(VDEV_PROP_SCHEDULER);
+	vd->vdev_max_active = vdev_prop_default_numeric(VDEV_PROP_MAX_ACTIVE);
 
 	list_link_init(&vd->vdev_config_dirty_node);
 	list_link_init(&vd->vdev_state_dirty_node);
@@ -4115,6 +4116,12 @@ vdev_load(vdev_t *vd)
 		if (error && error != ENOENT)
 			vdev_dbgmsg(vd, "vdev_load: zap_lookup(zap=%llu) "
 			    "failed [error=%d]", (u_longlong_t)zapobj, error);
+
+		error = vdev_prop_get_int(vd, VDEV_PROP_MAX_ACTIVE,
+		    &vd->vdev_max_active);
+		if (error && error != ENOENT)
+			vdev_dbgmsg(vd, "vdev_load: zap_lookup(zap=%llu) "
+			    "failed [error=%d]", (u_longlong_t)zapobj, error);
 	}
 
 	/*
@@ -6612,6 +6619,18 @@ vdev_prop_set(spa_t *spa, nvlist_t *innvl, nvlist_t *outnvl)
 			}
 			vd->vdev_scheduler = intval;
 			break;
+		case VDEV_PROP_MAX_ACTIVE:
+			if (nvpair_value_uint64(elem, &intval) != 0) {
+				error = EINVAL;
+				break;
+			}
+			/* It replaces zfs_vdev_max_active, a uint_t. */
+			if (intval > UINT_MAX) {
+				error = EINVAL;
+				break;
+			}
+			vd->vdev_max_active = intval;
+			break;
 		case VDEV_PROP_ALLOC_BIAS:
 			if (nvpair_value_uint64(elem, &intval) != 0) {
 				error = EINVAL;
@@ -7150,6 +7169,7 @@ vdev_prop_get(spa_t *spa, nvlist_t *innvl, nvlist_t *outnvl)
 			case VDEV_PROP_SLOW_IO_N:
 			case VDEV_PROP_SLOW_IO_T:
 			case VDEV_PROP_SCHEDULER:
+			case VDEV_PROP_MAX_ACTIVE:
 				err = vdev_prop_get_int(vd, prop, &intval);
 				if (err && err != ENOENT)
 					break;

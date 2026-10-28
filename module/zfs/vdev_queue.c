@@ -392,6 +392,20 @@ vdev_queue_class_max_active(vdev_queue_t *vq, zio_priority_t p)
 }
 
 /*
+ * The cap on i/os outstanding to this vdev: the max_active property of
+ * the vdev or its nearest ancestor that sets one, else zfs_vdev_max_active.
+ */
+static uint_t
+vdev_queue_max_active(const vdev_t *vd)
+{
+	for (; vd != NULL; vd = vd->vdev_parent) {
+		if (vd->vdev_max_active != 0)
+			return ((uint_t)vd->vdev_max_active);
+	}
+	return (zfs_vdev_max_active);
+}
+
+/*
  * Return the i/o class to issue from, or ZIO_PRIORITY_NUM_QUEUEABLE if
  * there is no eligible class.
  */
@@ -401,7 +415,7 @@ vdev_queue_class_to_issue(vdev_queue_t *vq)
 	uint32_t cq = vq->vq_cqueued;
 	zio_priority_t p, p1;
 
-	if (cq == 0 || vq->vq_active >= zfs_vdev_max_active)
+	if (cq == 0 || vq->vq_active >= vdev_queue_max_active(vq->vq_vdev))
 		return (ZIO_PRIORITY_NUM_QUEUEABLE);
 
 	/*
