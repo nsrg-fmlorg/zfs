@@ -11,6 +11,8 @@ name: nsrg
 #               code through libzpool, so this covers the kernel code too
 #   zts         debug kernel module (ASSERTs live), tags from .github/nsrg/tags
 #   bench       release build, fio A/B against $BASE on the same runner
+#   measure     release build, a branch's own .github/nsrg/measure.d
+#               scripts, run against $BASE and this tree
 
 on:
   push:
@@ -110,3 +112,23 @@ jobs:
         with:
           name: bench
           path: /var/tmp/bench
+
+  measure:
+    # Steps, not the job, are gated: hashFiles() is not available in a
+    # job-level if.  Without a measure.d script the job costs a checkout.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - if: hashFiles('.github/nsrg/measure.d/*.sh') != ''
+        run: .github/nsrg/deps.sh
+      - if: hashFiles('.github/nsrg/measure.d/*.sh') != ''
+        run: .github/nsrg/measure.sh
+        env:
+          BASE: ${{ inputs.base || 'upstream/master' }}
+      - uses: actions/upload-artifact@v4
+        if: always() && hashFiles('.github/nsrg/measure.d/*.sh') != ''
+        with:
+          name: measure
+          path: /var/tmp/measure
