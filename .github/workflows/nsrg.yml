@@ -1,0 +1,130 @@
+name: nsrg
+
+# Fork-local CI for the performance branches.  The upstream workflows
+# are disabled on this fork; this one runs on the runner itself.
+#
+#   checkstyle  the upstream style, lint and ABI checks, unchanged
+#   strict      strictest warnings (W=123, sparse, -Wextra and more);
+#               fails on any that land on a line this branch changed
+#   build       gcc and clang, --enable-debug (which adds -Werror), unit tests
+#   sanitize    userspace with ASan and UBSan; ztest drives the DMU/SPA
+#               code through libzpool, so this covers the kernel code too
+#   zts         debug kernel module (ASSERTs live), tags from .github/nsrg/tags
+#   bench       release build, fio A/B against $BASE on the same runner
+
+on:
+  push:
+    branches: ['wip/**', 'nsrg/**']
+  workflow_dispatch:
+    inputs:
+      tags:
+        description: 'ZTS tags, comma separated (default: .github/nsrg/tags)'
+        default: ''
+      base:
+        description: 'Ref to benchmark against'
+        default: 'upstream/master'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checkstyle:
+    # Same release as upstream's checkstyle job: 24.04's cppcheck stops
+    # on lib/libspl/include/sys/isa_defs.h.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: .github/nsrg/deps.sh checkstyle
+      - run: .github/nsrg/build.sh . release
+      - run: make -s -j"$(nproc)" checkstyle
+      - run: make -s -j"$(nproc)" lint
+      - id: checkabi
+        run: >
+          docker run -v "$PWD":/source ghcr.io/openzfs/libabigail
+          make -s -j"$(nproc)" checkabi
+      # As upstream does: hand back the regenerated .abi files so an
+      # intended interface change can be committed from the artifact.
+      - if: failure() && steps.checkabi.outcome == 'failure'
+        run: |
+          docker run -v "$PWD":/source ghcr.io/openzfs/libabigail \
+              make -s -j"$(nproc)" storeabi
+          find . -name '*.abi' | tar -cjf abi_files.tar.bz2 -T -
+      - uses: actions/upload-artifact@v4
+        if: failure() && steps.checkabi.outcome == 'failure'
+        with:
+          name: abi
+          path: abi_files.tar.bz2
+
+  strict:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: .github/nsrg/deps.sh strict
+      - run: .github/nsrg/strict.sh
+        env:
+          BASE: ${{ inputs.base || 'upstream/master' }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: strict
+          path: /var/tmp/strict
+
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: .github/nsrg/deps.sh ${{ matrix.cc }}
+      - run: CC=${{ matrix.cc }} .github/nsrg/build.sh . debug
+      - run: make -s -j"$(nproc)" unit
+
+  sanitize:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: .github/nsrg/deps.sh
+      - run: .github/nsrg/build.sh . sanitize
+      - run: .github/nsrg/ztest.sh
+
+  zts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - run: .github/nsrg/deps.sh
+      - run: .github/nsrg/build.sh . debug
+      - run: .github/nsrg/zts.sh
+        env:
+          TAGS: ${{ inputs.tags }}
+      # Kept on success too: a test that fails one run in four is
+      # traced by comparing its logs across runs.  Packed first, since
+      # upload-artifact refuses the ':' in names like direct:Linux.
+      - if: always()
+        run: sudo tar -C /var/tmp -czf /var/tmp/zts-results.tgz test_results
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: zts-results
+          path: /var/tmp/zts-results.tgz
+
+  bench:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: .github/nsrg/deps.sh
+      - run: .github/nsrg/bench.sh
+        env:
+          BASE: ${{ inputs.base || 'upstream/master' }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench
+          path: /var/tmp/bench
