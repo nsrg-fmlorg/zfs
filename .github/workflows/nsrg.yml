@@ -29,84 +29,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  checkstyle:
-    # Same release as upstream's checkstyle job: 24.04's cppcheck stops
-    # on lib/libspl/include/sys/isa_defs.h.
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
-      - run: .github/nsrg/deps.sh checkstyle
-      - run: .github/nsrg/build.sh . release
-      - run: make -s -j"$(nproc)" checkstyle
-      - run: make -s -j"$(nproc)" lint
-      - run: >
-          docker run -v "$PWD":/source ghcr.io/openzfs/libabigail
-          make -s -j"$(nproc)" checkabi
-
-  strict:
+  # wip/mem-measure runs only the memory profile; the other jobs would
+  # repeat what nsrg/ci already showed for this tree.
+  memprofile:
     runs-on: ubuntu-24.04
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - run: .github/nsrg/deps.sh strict
-      - run: .github/nsrg/strict.sh
-        env:
-          BASE: ${{ inputs.base || 'upstream/master' }}
+      - run: .github/nsrg/deps.sh
+      - run: .github/nsrg/memprofile.sh
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: strict
-          path: /var/tmp/strict
-
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        cc: [gcc, clang]
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - run: .github/nsrg/deps.sh ${{ matrix.cc }}
-      - run: CC=${{ matrix.cc }} .github/nsrg/build.sh . debug
-      - run: make -s -j"$(nproc)" unit
-
-  sanitize:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - run: .github/nsrg/deps.sh
-      - run: .github/nsrg/build.sh . sanitize
-      - run: .github/nsrg/ztest.sh
-
-  zts:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 240
-    steps:
-      - uses: actions/checkout@v4
-      - run: .github/nsrg/deps.sh
-      - run: .github/nsrg/build.sh . debug
-      - run: .github/nsrg/zts.sh
-        env:
-          TAGS: ${{ inputs.tags }}
-      - uses: actions/upload-artifact@v4
-        if: failure()
-        with:
-          name: zts-results
-          path: /var/tmp/test_results
-
-  bench:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - run: .github/nsrg/deps.sh
-      - run: .github/nsrg/bench.sh
-        env:
-          BASE: ${{ inputs.base || 'upstream/master' }}
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: bench
-          path: /var/tmp/bench
+          name: mem
+          path: /var/tmp/mem
