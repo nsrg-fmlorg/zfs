@@ -10219,8 +10219,10 @@ static boolean_t
 l2arc_hdr_size_exceeded(void)
 {
 	int64_t s = aggsum_upper_bound(&arc_sums.arcstat_l2_hdr_size);
+	uint64_t limit = (arc_warm ? arc_c : arc_c_max) *
+	    l2arc_meta_percent / 100;
 
-	return (s > (arc_warm ? arc_c : arc_c_max) * l2arc_meta_percent / 100);
+	return (s > 0 && (uint64_t)s > limit);
 }
 
 static boolean_t
