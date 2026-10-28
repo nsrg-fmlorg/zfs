@@ -371,15 +371,19 @@ zfs_uioskip(zfs_uio_t *uio, size_t n)
 	 * use uio_loffset as a pointer to the next logical byte to
 	 * copy in the request.  We don't have to do any fancy
 	 * accounting with uio_bvec/uio_iovcnt since we don't use
-	 * them.
+	 * them.  Such a uio used to fall through to the UIO_SYSSPACE
+	 * case below and its ASSERT; nothing skipped one until zvol
+	 * Direct I/O, which advances the uio from dmu_read_uio_direct().
 	 */
-	if (uio->uio_segflg == UIO_BVEC && uio->rq == NULL) {
-		uio->uio_skip += n;
-		while (uio->uio_iovcnt &&
-		    uio->uio_skip >= uio->uio_bvec->bv_len) {
-			uio->uio_skip -= uio->uio_bvec->bv_len;
-			uio->uio_bvec++;
-			uio->uio_iovcnt--;
+	if (uio->uio_segflg == UIO_BVEC) {
+		if (uio->rq == NULL) {
+			uio->uio_skip += n;
+			while (uio->uio_iovcnt &&
+			    uio->uio_skip >= uio->uio_bvec->bv_len) {
+				uio->uio_skip -= uio->uio_bvec->bv_len;
+				uio->uio_bvec++;
+				uio->uio_iovcnt--;
+			}
 		}
 	} else if (uio->uio_segflg == UIO_ITER) {
 		iov_iter_advance(uio->uio_iter, n);
@@ -647,9 +651,89 @@ zfs_uio_get_dio_pages_iov_iter(zfs_uio_t *uio, zfs_uio_rw_t rw)
 	return (0);
 }
 
+#ifndef nth_page
+/* As in abd_os.c: nth_page() is gone since 6.18, and so is the need. */
+#define	nth_page(p, n)	((p)+(n))
+#endif
+
+/*
+ * Add the pages of one bio_vec, which must cover whole pages, to the
+ * Direct I/O page array, taking a reference on each.
+ */
+static int
+zfs_uio_add_dio_pages_bvec(zfs_uio_t *uio, const struct bio_vec *bv,
+    size_t skip, size_t len, long maxpages)
+{
+	size_t off = bv->bv_offset + skip;
+
+	if (!IS_P2ALIGNED(off, PAGE_SIZE) || !IS_P2ALIGNED(len, PAGE_SIZE))
+		return (SET_ERROR(EINVAL));
+
+	for (size_t done = 0; done < len; done += PAGE_SIZE) {
+		struct page *p = nth_page(bv->bv_page,
+		    (off + done) >> PAGE_SHIFT);
+
+		if (uio->uio_dio.npages == maxpages)
+			return (SET_ERROR(EINVAL));
+		get_page(p);
+		uio->uio_dio.pages[uio->uio_dio.npages++] = p;
+	}
+
+	return (0);
+}
+
+/*
+ * Collect the pages of a bio_vec backed uio, which is how a zvol sees a
+ * bio or a blk-mq request.  dmu_read_uio_direct() and
+ * dmu_write_uio_direct() find the page for an offset by dividing its
+ * distance from uio_soffset by PAGE_SIZE, so every segment has to start
+ * and end on a page boundary; a request that does not is refused, and
+ * the caller goes through the ARC instead.
+ */
+static int
+zfs_uio_get_dio_pages_bvec(zfs_uio_t *uio, long maxpages)
+{
+	size_t resid = (size_t)uio->uio_resid;
+	int error = 0;
+
+	if (uio->rq != NULL) {
+		struct bio_vec bv;
+		struct req_iterator iter;
+
+		rq_for_each_segment(bv, uio->rq, iter) {
+			size_t len = MIN(bv.bv_len, resid);
+
+			if (len == 0)
+				break;
+			error = zfs_uio_add_dio_pages_bvec(uio, &bv, 0, len,
+			    maxpages);
+			if (error != 0)
+				return (error);
+			resid -= len;
+		}
+	} else {
+		const struct bio_vec *bv = uio->uio_bvec;
+		size_t skip = uio->uio_skip;
+
+		for (int i = 0; i < uio->uio_iovcnt && resid > 0; i++, bv++) {
+			size_t len = MIN(bv->bv_len - skip, resid);
+
+			error = zfs_uio_add_dio_pages_bvec(uio, bv, skip, len,
+			    maxpages);
+			if (error != 0)
+				return (error);
+			resid -= len;
+			skip = 0;
+		}
+	}
+
+	return (resid == 0 ? 0 : SET_ERROR(EINVAL));
+}
+
 /*
  * This function pins user pages. In the event that the user pages were not
- * successfully pinned an error value is returned.
+ * successfully pinned an error value is returned.  A bio_vec backed uio
+ * (a zvol request) has its pages referenced rather than pinned.
  *
  * On success, 0 is returned.
  */
@@ -670,6 +754,9 @@ zfs_uio_get_dio_pages_alloc(zfs_uio_t *uio, zfs_uio_rw_t rw)
 #else
 		error = zfs_uio_get_dio_pages_iov_iter(uio, rw);
 #endif
+	} else if (uio->uio_segflg == UIO_BVEC) {
+		uio->uio_dio.pages = vmem_alloc(size, KM_SLEEP);
+		error = zfs_uio_get_dio_pages_bvec(uio, npages);
 	} else {
 		return (SET_ERROR(EOPNOTSUPP));
 	}
@@ -693,7 +780,13 @@ zfs_uio_get_dio_pages_alloc(zfs_uio_t *uio, zfs_uio_rw_t rw)
 		ASSERT3S(uio->uio_dio.npages, ==, npages);
 	}
 
-	if (rw == UIO_WRITE && !uio->uio_dio.pinned)
+	/*
+	 * A user page mapped to ZERO_PAGE() could be replaced under the
+	 * write.  The pages of a bio belong to the kernel, and ZERO_PAGE()
+	 * there (blkdev_issue_zeroout() uses it) stays zero.
+	 */
+	if (rw == UIO_WRITE && !uio->uio_dio.pinned &&
+	    uio->uio_segflg == UIO_ITER)
 		zfs_uio_dio_check_for_zero_page(uio);
 
 	uio->uio_extflg |= UIO_DIRECT;
