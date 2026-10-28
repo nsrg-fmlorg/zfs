@@ -1,0 +1,26 @@
+#cloud-config
+# First boot only: install fio, arrange for every later boot to run the
+# script on the disk with serial CTRL and power off, then switch
+# cloud-init off so later boots do not wait for a datasource.
+packages:
+  - fio
+write_files:
+  - path: /etc/systemd/system/bench.service
+    content: |
+      [Unit]
+      Description=Run the benchmark script from the CTRL disk
+      After=multi-user.target
+
+      [Service]
+      Type=oneshot
+      ExecStart=/bin/sh -c 'udevadm settle; mkdir -p /mnt/c; if mount /dev/disk/by-id/virtio-CTRL /mnt/c; then sh /mnt/c/run.sh >/mnt/c/guest.log 2>&1; sync; umount /mnt/c; fi; systemctl poweroff'
+
+      [Install]
+      WantedBy=multi-user.target
+runcmd:
+  - [systemctl, enable, bench.service]
+  - [touch, /etc/cloud/cloud-init.disabled]
+  - [sh, -c, 'command -v fio > /var/log/fio-installed']
+power_state:
+  mode: poweroff
+  condition: true

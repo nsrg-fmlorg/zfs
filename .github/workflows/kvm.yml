@@ -1,0 +1,33 @@
+name: kvm
+
+# QD=1 and QD=32 latency inside a KVM guest whose disk sits on a zvol,
+# on a raw image file in a dataset, or on a plain loop device for the
+# baseline.  One job; the configurations are in .github/nsrg/kvm/configs.
+
+on:
+  push:
+    branches: ['wip/kvm-bench']
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  kvm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - run: .github/nsrg/deps.sh
+      - run: >
+          sudo apt-get install -y qemu-system-x86 qemu-utils
+          cloud-image-utils e2fsprogs bc
+      - run: .github/nsrg/build.sh . release
+      - run: .github/nsrg/load.sh .
+      - run: .github/nsrg/kvm/kvm-bench.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: kvm
+          path: /var/tmp/kvm
