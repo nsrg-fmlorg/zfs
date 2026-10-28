@@ -681,7 +681,8 @@ zvol_strategy_impl(zv_request_t *zvr)
 			} else {
 				dmu_write_by_dnode(zv->zv_dn, off, size, addr,
 				    tx, DMU_READ_PREFETCH);
-				zvol_log_write(zv, tx, off, size, commit);
+				zvol_log_write(zv, tx, off, size, commit,
+				    B_FALSE);
 				dmu_tx_commit(tx);
 			}
 		}
@@ -889,7 +890,7 @@ zvol_cdev_write(struct cdev *dev, struct uio *uio_s, int ioflag)
 		error = dmu_write_uio_dnode(zv->zv_dn, &uio, bytes, tx,
 		    DMU_READ_PREFETCH);
 		if (error == 0)
-			zvol_log_write(zv, tx, off, bytes, commit);
+			zvol_log_write(zv, tx, off, bytes, commit, B_FALSE);
 		dmu_tx_commit(tx);
 
 		if (error)
