@@ -1,0 +1,51 @@
+name: nvmm-probe
+
+# Can NVMM run nested on a GitHub runner?  The runner side reports what
+# KVM exposes; the NetBSD guest (vmactions, KVM with -cpu host) then
+# tries to load nvmm and start a qemu guest on it.
+
+on:
+  push:
+    branches: ['wip/nvmm-probe']
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Runner virtualisation
+        run: |
+          lscpu | grep -E 'Model name|Vendor|Virtualization|Hypervisor'
+          grep -o -w -E 'vmx|svm' /proc/cpuinfo | sort | uniq -c || true
+          for m in kvm_intel kvm_amd; do
+            f=/sys/module/$m/parameters/nested
+            [ -r "$f" ] && echo "$m nested=$(cat "$f")"
+          done
+          ls -l /dev/kvm
+      - uses: vmactions/netbsd-vm@v1
+        with:
+          release: '11.0'
+          prepare: |
+            /usr/sbin/pkg_info -E pkgin || true
+            pkgin -y install qemu
+          run: |
+            uname -a
+            sysctl hw.model machdep.cpu_brand 2>/dev/null || true
+            dmesg | grep -i -E 'vmx|svm|nvmm|virtuali' || true
+            modstat | grep -i nvmm || modload nvmm || true
+            modstat | grep -i nvmm || true
+            ls -l /dev/nvmm || true
+            nvmmctl identify || true
+            qemu-system-x86_64 -accel help || true
+            # No disk: SeaBIOS runs and finds nothing to boot.  An accel
+            # that fails to start exits at once with an error; one that
+            # works is still running when timeout(1) stops it (124).
+            timeout 15 qemu-system-x86_64 -accel nvmm -M q35 -m 256 \
+                -display none -serial file:/tmp/seabios.log -no-reboot
+            echo "qemu exit: $?"
+            head -c 2000 /tmp/seabios.log || true
