@@ -89,11 +89,14 @@ jobs:
       - run: .github/nsrg/zts.sh
         env:
           TAGS: ${{ inputs.tags }}
+      # upload-artifact refuses the ':' in names like direct:Linux.
+      - if: always()
+        run: sudo tar -C /var/tmp -czf /var/tmp/zts-results.tgz test_results
       - uses: actions/upload-artifact@v4
-        if: failure()
+        if: always()
         with:
           name: zts-results
-          path: /var/tmp/test_results
+          path: /var/tmp/zts-results.tgz
 
   bench:
     runs-on: ubuntu-24.04
@@ -102,9 +105,7 @@ jobs:
         with:
           fetch-depth: 0
       - run: .github/nsrg/deps.sh
-      - run: .github/nsrg/bench.sh
-        env:
-          BASE: ${{ inputs.base || 'upstream/master' }}
+      - run: .github/nsrg/zvolbench.sh
       - uses: actions/upload-artifact@v4
         if: always()
         with:
