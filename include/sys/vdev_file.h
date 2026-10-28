@@ -25,7 +25,14 @@ extern "C" {
 
 typedef struct vdev_file {
 	zfs_file_t	*vf_file;
+	uint64_t	vf_flags;
 } vdev_file_t;
+
+/*
+ * FreeBSD only: vf_file is a device node with no GEOM provider, and I/O
+ * goes to its strategy routine rather than through VOPs.
+ */
+#define	VDEV_FILE_STRATEGY	(1ULL << 0)
 
 extern void vdev_file_init(void);
 extern void vdev_file_fini(void);
