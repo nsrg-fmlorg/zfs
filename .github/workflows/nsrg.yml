@@ -29,8 +29,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # wip/mem-measure runs only the memory profile; the other jobs would
-  # repeat what nsrg/ci already showed for this tree.
+  # wip/mem-measure runs only the memory and compression-latency
+  # profiles; the other jobs would repeat what nsrg/ci already showed.
   memprofile:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
@@ -43,3 +43,16 @@ jobs:
         with:
           name: mem
           path: /var/tmp/mem
+
+  complat:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - run: .github/nsrg/deps.sh
+      - run: .github/nsrg/complat.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: complat
+          path: /var/tmp/complat

@@ -15,11 +15,16 @@ ROUNDS=3
 ARC_MAX=$((2 * 1024 * 1024 * 1024))
 SIZE=4G
 RUNTIME=20
-CONFIGS="default default2 pc_metadata direct_always fio_direct fio_uncached"
+CONFIGS="default default2 pc_metadata direct_always fio_direct fio_uncached
+    fio_noreuse"
 mkdir -p "$OUT"
 
-fio_has() {	# fio_has <option>: does this fio know the option?
-	fio --cmdhelp="$1" 2>/dev/null | grep -q "^$1"
+# fio_has <option>: does this fio know the option?  --cmdhelp indents
+# the name, and the full list is checked too, so one miss is not the
+# answer.
+fio_has() {
+	fio --cmdhelp="$1" 2>/dev/null | grep -q "^ *$1:" ||
+	    fio --cmdhelp=all 2>/dev/null | grep -q "^ *$1 "
 }
 
 {
@@ -65,6 +70,7 @@ fio_opts() {	# fio_opts <config>
 	case $1 in
 	fio_direct)	echo "--direct=1" ;;
 	fio_uncached)	echo "--uncached=1" ;;
+	fio_noreuse)	echo "--fadvise_hint=noreuse" ;;
 	*)		echo "" ;;
 	esac
 }
@@ -102,6 +108,10 @@ r=1
 while [ $r -le $ROUNDS ]; do
 	for c in $CONFIGS; do
 		if [ "$c" = fio_uncached ] && ! fio_has uncached; then
+			continue
+		fi
+		if [ "$c" = fio_noreuse ] &&
+		    ! fio --cmdhelp=fadvise_hint | grep -q noreuse; then
 			continue
 		fi
 		pool_create "$c"
