@@ -14,7 +14,7 @@ HERE=$(pwd)
 NDEV=4
 DEVSIZE_MB=2048
 RUNTIME=15
-ROUNDS=3
+ROUNDS=2
 JOBS=$(nproc)
 mkdir -p "$OUT"
 
@@ -44,7 +44,8 @@ first() {
 	printf '%s\n' $DEVS | head -n "$1" | tr '\n' ' '
 }
 
-# fio_iops <rw> <fio args...>: total IOPS of one run
+# fio_iops <rw> <fio args...>: total IOPS of one run.  Defaults to
+# libaio at iodepth 32 with one job per CPU; later arguments override.
 fio_iops() {
 	rw=$1
 	shift
@@ -52,6 +53,44 @@ fio_iops() {
 	    --direct=1 --numjobs="$JOBS" --time_based --runtime=$RUNTIME \
 	    --group_reporting --output-format=json "$@" |
 	    jq '(.jobs[0].read.iops + .jobs[0].write.iops) | floor'
+}
+
+# Whether ZFS completes libaio requests before io_submit() returns, which
+# would hold every job to one I/O in flight whatever iodepth says: sweep
+# the depth and the number of jobs, on ZFS and on the raw devices, and
+# count context switches per I/O.
+concurrency() {
+	# shellcheck disable=SC2046
+	sudo "$HERE"/zpool create -f -o ashift=12 -O compression=off \
+	    -O primarycache=metadata -O recordsize=4k -O atime=off \
+	    iops $(first $NDEV)
+	sudo fio --name=t --directory=/iops --size=64M --numjobs=64 \
+	    --rw=write --bs=1M --end_fsync=1 >/dev/null
+	raw4=$(first $NDEV | sed 's/ $//; s/ /:/g')
+	for jobs in 4 16 64; do
+		for qd in 1 32; do
+			for rw in randread randwrite; do
+				z=$(fio_iops $rw --directory=/iops --size=64M \
+				    --numjobs=$jobs --iodepth=$qd --thread)
+				record conc_zfs $NDEV "j$jobs" "$rw/qd$qd" 1 "$z"
+				r=$(fio_iops $rw --filename="$raw4" \
+				    --numjobs=$jobs --iodepth=$qd --thread)
+				record conc_raw $NDEV "j$jobs" "$rw/qd$qd" 1 "$r"
+			done
+		done
+	done
+	for rw in randread randwrite; do
+		sudo perf stat -a -e context-switches -x, -o "$OUT"/cs-$rw.txt \
+		    -- sleep 10 &
+		n=$(fio_iops $rw --directory=/iops --size=64M --numjobs=64 \
+		    --iodepth=1 --thread --runtime=12)
+		wait
+		cs=$(sudo grep context-switches "$OUT"/cs-$rw.txt | cut -d, -f1)
+		sudo chmod a+r "$OUT"/cs-$rw.txt
+		echo "$rw j64 qd1: $n IOPS, $cs context switches in 10s," \
+		    "$((cs / (n * 10 + 1))) per I/O" | tee -a "$OUT"/env
+	done
+	sudo "$HERE"/zpool destroy iops
 }
 
 record() {	# record <label> <vdevs> <sched> <rw> <round> <iops>
@@ -132,9 +171,7 @@ profile() {
 		sudo perf report -i "$OUT"/perf-$rw.data --no-children \
 		    --sort symbol --stdio 2>/dev/null | grep -v '^#' |
 		    grep '%' | head -40 > "$OUT"/perf-$rw.txt || true
-		# shellcheck disable=SC2024
-		sudo perf lock contention -ab -- sleep 10 \
-		    > "$OUT"/lock-$rw.txt 2>&1 || true
+		sudo rm -f "$OUT"/perf-$rw.data
 		wait
 	done
 	sudo "$HERE"/zpool destroy iops
@@ -163,6 +200,7 @@ for sched in auto on off; do
 		zfs_run zfs "$n" "$sched"
 	done
 done
+concurrency
 bypass_check
 profile
 taskq_variants
@@ -181,6 +219,5 @@ awk -F'\t' '
 	echo; echo "== vdev_should_queue_io() return values"; cat "$OUT"/bypass.txt 2>/dev/null
 	for rw in randread randwrite; do
 		echo; echo "== perf $rw"; head -25 "$OUT"/perf-$rw.txt 2>/dev/null
-		echo; echo "== lock contention $rw"; head -25 "$OUT"/lock-$rw.txt 2>/dev/null
 	done
 } | tee -a "$GITHUB_STEP_SUMMARY"
