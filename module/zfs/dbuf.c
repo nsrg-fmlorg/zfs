@@ -230,22 +230,11 @@ static uint_t dbuf_metadata_cache_shift = 6;
 static uint_t dbuf_mutex_cache_shift = 0;
 
 /*
- * Controls the number of dbuf eviction threads.
- * Possible values:
- * 0  (auto) compute the number of threads using a logarithmic formula.
- * 1  (disabled) one thread - parallel eviction is disabled.
- * 2+ (manual) set the number manually, limited by dbuf_evict_threads_max.
+ * Number of threads the dbuf eviction thread spreads its work over.
+ * 0 picks a number from the CPU count, as zfs_arc_evict_threads does;
+ * 1 evicts from the eviction thread alone.  Read once at module load.
  */
 static uint_t dbuf_evict_threads = 0;
-
-/*
- * The number of allocated dbuf eviction threads. This limits the maximum value
- * of dbuf_evict_threads.
- * The number is set up at module load time and depends on the initial value of
- * dbuf_evict_threads. If dbuf_evict_threads is set to auto, a logarithmic
- * function is used to compute this value. Otherwise, it is set to max_ncpus.
- */
-static uint_t dbuf_evict_threads_max;
 
 static unsigned long dbuf_cache_target_bytes(void);
 static unsigned long dbuf_metadata_cache_target_bytes(void);
@@ -780,13 +769,83 @@ dbuf_cache_above_lowater(void)
 }
 
 /*
- * Evict the oldest eligible dbufs from the dbuf cache.
- * Use the multilist sublist (mls) with the provided index #idx.
+ * Walk towards the head of a dbuf cache sublist from db, past eviction
+ * markers (which have no objset) and dbufs another thread holds, and
+ * return the first one whose db_mtx we now hold, or NULL.
+ */
+static dmu_buf_impl_t *
+dbuf_evict_candidate(multilist_sublist_t *mls, dmu_buf_impl_t *db)
+{
+	while (db != NULL && (db->db_objset == NULL ||
+	    mutex_tryenter(&db->db_mtx) == 0))
+		db = multilist_sublist_prev(mls, db);
+	return (db);
+}
+
+/*
+ * Take db, whose db_mtx is held, out of the dbuf cache and destroy it.
+ * Drops the sublist lock.  Returns the number of bytes released.
+ */
+static uint64_t
+dbuf_evict_locked(multilist_sublist_t *mls, dmu_buf_impl_t *db)
+{
+	DTRACE_PROBE2(dbuf__evict__one, dmu_buf_impl_t *, db,
+	    multilist_sublist_t *, mls);
+
+	multilist_sublist_remove(mls, db);
+	multilist_sublist_unlock(mls);
+	uint64_t size = db->db.db_size;
+	uint64_t usize = dmu_buf_user_size(&db->db);
+	(void) zfs_refcount_remove_many(
+	    &dbuf_caches[DB_DBUF_CACHE].size, size, db);
+	(void) zfs_refcount_remove_many(
+	    &dbuf_caches[DB_DBUF_CACHE].size, usize, db->db_user);
+	DBUF_STAT_BUMPDOWN(cache_levels[db->db_level]);
+	DBUF_STAT_BUMPDOWN(cache_count);
+	DBUF_STAT_DECR(cache_levels_bytes[db->db_level], size + usize);
+	ASSERT3U(db->db_caching_status, ==, DB_DBUF_CACHE);
+	db->db_caching_status = DB_NO_CACHE;
+	dbuf_destroy(db);
+	DBUF_STAT_BUMP(cache_total_evicts);
+
+	return (size + usize);
+}
+
+/*
+ * Evict the oldest eligible dbuf from the dbuf cache.  This is what a
+ * thread releasing a dbuf does when it finds the cache above its high
+ * water mark: the eviction thread is behind, but taking the whole excess
+ * on here would put every such thread to work evicting at once.  It
+ * allocates nothing, so it cannot sleep on memory.
  */
 static void
-dbuf_evict_many(uint64_t bytes, unsigned int idx)
+dbuf_evict_one(void)
 {
-	int64_t evicted = 0;
+	uint_t idx = multilist_get_random_index(
+	    &dbuf_caches[DB_DBUF_CACHE].cache);
+	multilist_sublist_t *mls = multilist_sublist_lock_idx(
+	    &dbuf_caches[DB_DBUF_CACHE].cache, idx);
+
+	ASSERT(!MUTEX_HELD(&dbuf_evict_lock));
+
+	dmu_buf_impl_t *db = dbuf_evict_candidate(mls,
+	    multilist_sublist_tail(mls));
+	if (db != NULL)
+		(void) dbuf_evict_locked(mls, db);
+	else
+		multilist_sublist_unlock(mls);
+}
+
+/*
+ * Evict at least bytes from sublist idx of the dbuf cache, oldest first,
+ * or as much as it holds.  A marker keeps our place while the sublist
+ * lock is dropped around each dbuf_destroy(); dbufs we had to step over
+ * stay behind it and are not visited again.
+ */
+static void
+dbuf_evict_many(uint64_t bytes, uint_t idx)
+{
+	uint64_t evicted = 0;
 	dmu_buf_impl_t *marker = kmem_cache_alloc(dbuf_kmem_cache, KM_SLEEP);
 	marker->db_objset = NULL;
 
@@ -801,42 +860,16 @@ dbuf_evict_many(uint64_t bytes, unsigned int idx)
 	dmu_buf_impl_t *db = multilist_sublist_tail(mls);
 	multilist_sublist_insert_after(mls, db, marker);
 
-	while (db != NULL && evicted < bytes) {
-		int skip = 0;
-		while (db != NULL && (db->db_objset == NULL ||
-		    mutex_tryenter(&db->db_mtx) == 0)) {
-			db = multilist_sublist_prev(mls, db);
-			if (skip == 0)
-				skip = 1;
-		}
-
-		if (db == NULL)
+	while (evicted < bytes) {
+		dmu_buf_impl_t *victim = dbuf_evict_candidate(mls, db);
+		if (victim == NULL)
 			break;
-
-		if (skip) {
+		if (victim != db) {
 			multilist_sublist_remove(mls, marker);
-			multilist_sublist_insert_before(mls, db, marker);
+			multilist_sublist_insert_before(mls, victim, marker);
 		}
 
-		DTRACE_PROBE2(dbuf__evict__one, dmu_buf_impl_t *, db,
-		    multilist_sublist_t *, mls);
-
-		multilist_sublist_remove(mls, db);
-		multilist_sublist_unlock(mls);
-		uint64_t size = db->db.db_size;
-		uint64_t usize = dmu_buf_user_size(&db->db);
-		(void) zfs_refcount_remove_many(
-		    &dbuf_caches[DB_DBUF_CACHE].size, size, db);
-		(void) zfs_refcount_remove_many(
-		    &dbuf_caches[DB_DBUF_CACHE].size, usize, db->db_user);
-		DBUF_STAT_BUMPDOWN(cache_levels[db->db_level]);
-		DBUF_STAT_BUMPDOWN(cache_count);
-		DBUF_STAT_DECR(cache_levels_bytes[db->db_level], size + usize);
-		ASSERT3U(db->db_caching_status, ==, DB_DBUF_CACHE);
-		db->db_caching_status = DB_NO_CACHE;
-		dbuf_destroy(db);
-		DBUF_STAT_BUMP(cache_total_evicts);
-		evicted += size + usize;
+		evicted += dbuf_evict_locked(mls, victim);
 
 		mls = multilist_sublist_lock_idx(
 		    &dbuf_caches[DB_DBUF_CACHE].cache, idx);
@@ -848,17 +881,19 @@ dbuf_evict_many(uint64_t bytes, unsigned int idx)
 	kmem_cache_free(dbuf_kmem_cache, marker);
 }
 
-typedef struct evict_arg {
-	taskq_ent_t	tqe;
-	unsigned	idx;
-	uint64_t	bytes;
-} evict_arg_t;
+typedef struct dbuf_evict_arg {
+	taskq_ent_t	dea_tqe;
+	uint64_t	dea_bytes;
+	uint64_t	dea_idx;
+} dbuf_evict_arg_t;
+
+static dbuf_evict_arg_t *dbuf_evict_arg;
 
 static void
 dbuf_evict_task(void *arg)
 {
-	evict_arg_t *eva = arg;
-	dbuf_evict_many(eva->bytes, eva->idx);
+	dbuf_evict_arg_t *dea = arg;
+	dbuf_evict_many(dea->dea_bytes, (uint_t)dea->dea_idx);
 }
 
 /*
@@ -867,75 +902,45 @@ dbuf_evict_task(void *arg)
  */
 #define	MIN_EVICT_SIZE	(SPA_MAXBLOCKSIZE)
 
+/*
+ * Bring the dbuf cache down to its low water mark, splitting the work
+ * over consecutive sublists when there is enough of it.  Only
+ * dbuf_evict_thread() calls this, so dbuf_evict_arg is not shared.
+ */
 static void
 dbuf_evict(void)
 {
-	int64_t bytes = (zfs_refcount_count(&dbuf_caches[DB_DBUF_CACHE].size) -
-	    dbuf_cache_lowater_bytes());
+	multilist_t *ml = &dbuf_caches[DB_DBUF_CACHE].cache;
+	int64_t size = zfs_refcount_count(&dbuf_caches[DB_DBUF_CACHE].size);
+	uint64_t lowater = dbuf_cache_lowater_bytes();
 
-	if (bytes <= 0)
+	if (size <= 0 || (uint64_t)size <= lowater)
 		return;
 
-	evict_arg_t *evarg = NULL;
-	int num_sublists = multilist_get_num_sublists(
-	    &dbuf_caches[DB_DBUF_CACHE].cache);
+	uint64_t bytes = (uint64_t)size - lowater;
+	uint_t idx = multilist_get_random_index(ml);
+	uint_t ntasks = MIN(dbuf_evict_threads, multilist_get_num_sublists(ml));
 
-	uint_t nthreads = (dbuf_evict_taskq == NULL ? 1 : MIN(num_sublists,
-	    (dbuf_evict_threads == 0 ? dbuf_evict_threads_max :
-	    MIN(dbuf_evict_threads, dbuf_evict_threads_max))));
-
-	boolean_t use_evcttq =  nthreads > 1;
-
-	int sublist_idx = multilist_get_random_index(
-	    &dbuf_caches[DB_DBUF_CACHE].cache);
-
-	uint64_t evict = MIN_EVICT_SIZE;
-	uint_t ntasks = nthreads;
-
-	if (use_evcttq) {
-		if (bytes > nthreads * MIN_EVICT_SIZE) {
-			evict = DIV_ROUND_UP(bytes, nthreads);
-		} else {
-			ntasks = DIV_ROUND_UP(bytes, MIN_EVICT_SIZE);
-			if (ntasks == 1)
-				use_evcttq = B_FALSE;
-		}
+	if (dbuf_evict_taskq == NULL || bytes < 2 * MIN_EVICT_SIZE) {
+		dbuf_evict_many(bytes, idx);
+		return;
 	}
 
-	if (use_evcttq) {
-		evarg = kmem_zalloc(sizeof (*evarg) * nthreads, KM_NOSLEEP);
-		if (evarg) {
-			for (int i = 0; i < nthreads; i++)
-				taskq_init_ent(&evarg[i].tqe);
-		} else {
-			/*
-			 * Fall back to a regular single-threaded eviction.
-			 */
-			use_evcttq = B_FALSE;
-		}
+	ntasks = (uint_t)MIN(ntasks, bytes / MIN_EVICT_SIZE);
+	uint64_t per_task = DIV_ROUND_UP(bytes, ntasks);
+
+	for (uint_t i = 0; i < ntasks; i++) {
+		dbuf_evict_arg_t *dea = &dbuf_evict_arg[i];
+
+		dea->dea_bytes = per_task;
+		dea->dea_idx = idx;
+		taskq_dispatch_ent(dbuf_evict_taskq, dbuf_evict_task, dea, 0,
+		    &dea->dea_tqe);
+
+		if (++idx == multilist_get_num_sublists(ml))
+			idx = 0;
 	}
-
-	if (!use_evcttq)
-		return (dbuf_evict_many(bytes, sublist_idx));
-
-	/*
-	 * Go to the parallel eviction.
-	 */
-
-	for (int i = 0; i < ntasks; i++) {
-		evarg[i].idx = sublist_idx;
-		evarg[i].bytes = evict;
-
-		taskq_dispatch_ent(dbuf_evict_taskq, dbuf_evict_task,
-		    &evarg[i], 0, &evarg[i].tqe);
-
-		/* wrap sublist_idx */
-		if (++sublist_idx >= num_sublists)
-			sublist_idx = 0;
-	}
-
 	taskq_wait(dbuf_evict_taskq);
-	kmem_free(evarg, sizeof (*evarg) * nthreads);
 }
 
 /*
@@ -996,14 +1001,14 @@ dbuf_evict_notify(uint64_t size)
 	 */
 	if (size > dbuf_cache_target_bytes()) {
 		/*
-		 * Avoid calling dbuf_evict() from memory reclaim context
+		 * Avoid calling dbuf_evict_one() from memory reclaim context
 		 * (e.g. Linux kswapd, FreeBSD pagedaemon) to prevent deadlocks.
 		 * Memory reclaim threads can get stuck waiting for the dbuf
 		 * hash lock.
 		 */
 		if (size > dbuf_cache_hiwater_bytes() &&
 		    !current_is_reclaim_thread()) {
-			dbuf_evict();
+			dbuf_evict_one();
 		}
 		cv_signal(&dbuf_evict_cv);
 	}
@@ -1069,6 +1074,32 @@ dbuf_kstat_update(kstat_t *ksp, int rw)
 	return (0);
 }
 
+/*
+ * Sized as in arc_evict_thread_init(), so that the two tunables mean the
+ * same thing.
+ */
+static void
+dbuf_evict_taskq_init(void)
+{
+	if (dbuf_evict_threads == 0) {
+		if (max_ncpus < 6)
+			dbuf_evict_threads = 1;
+		else
+			dbuf_evict_threads =
+			    (uint_t)(highbit64(max_ncpus) - 1) + max_ncpus / 32;
+	} else if (dbuf_evict_threads > max_ncpus) {
+		dbuf_evict_threads = max_ncpus;
+	}
+
+	if (dbuf_evict_threads > 1) {
+		dbuf_evict_taskq = taskq_create("dbuf_evict",
+		    (int)dbuf_evict_threads, defclsyspri, 0, INT_MAX,
+		    TASKQ_PREPOPULATE);
+		dbuf_evict_arg = kmem_zalloc(
+		    sizeof (dbuf_evict_arg_t) * dbuf_evict_threads, KM_SLEEP);
+	}
+}
+
 void
 dbuf_init(void)
 {
@@ -1131,27 +1162,7 @@ dbuf_init(void)
 	 * configuration is not required.
 	 */
 	dbu_evict_taskq = taskq_create("dbu_evict", 1, defclsyspri, 0, 0, 0);
-	if (max_ncpus > 1) {
-		if (dbuf_evict_threads == 0) {
-			/*
-			 * Limit the maximum number of threads by 16.
-			 * We reach the limit when max_ncpu == 256.
-			 */
-			uint_t nthreads = MIN((highbit64(max_ncpus) - 1) +
-			    max_ncpus / 32, 16);
-			dbuf_evict_threads_max = max_ncpus < 4 ? 1 :
-			    nthreads;
-		} else {
-			dbuf_evict_threads_max = max_ncpus / 2;
-		}
-
-		if (dbuf_evict_threads_max > 1) {
-			dbuf_evict_taskq = taskq_create("dbuf_evict",
-			    dbuf_evict_threads_max,
-			    defclsyspri, 0, INT_MAX, TASKQ_PREPOPULATE);
-		}
-	}
-
+	dbuf_evict_taskq_init();
 
 	for (dbuf_cached_state_t dcs = 0; dcs < DB_CACHE_MAX; dcs++) {
 		multilist_create(&dbuf_caches[dcs].cache,
@@ -1220,11 +1231,6 @@ dbuf_fini(void)
 	kmem_cache_destroy(dbuf_dirty_kmem_cache);
 	taskq_destroy(dbu_evict_taskq);
 
-	if (dbuf_evict_taskq != NULL) {
-		taskq_wait(dbuf_evict_taskq);
-		taskq_destroy(dbuf_evict_taskq);
-	}
-
 	mutex_enter(&dbuf_evict_lock);
 	dbuf_evict_thread_exit = B_TRUE;
 	while (dbuf_evict_thread_exit) {
@@ -1232,6 +1238,13 @@ dbuf_fini(void)
 		cv_wait(&dbuf_evict_cv, &dbuf_evict_lock);
 	}
 	mutex_exit(&dbuf_evict_lock);
+
+	/* Only the eviction thread dispatches, and it has exited. */
+	if (dbuf_evict_taskq != NULL) {
+		taskq_destroy(dbuf_evict_taskq);
+		kmem_free(dbuf_evict_arg,
+		    sizeof (dbuf_evict_arg_t) * dbuf_evict_threads);
+	}
 
 	mutex_destroy(&dbuf_evict_lock);
 	cv_destroy(&dbuf_evict_cv);
@@ -4390,7 +4403,7 @@ dmu_buf_rele(dmu_buf_t *db, const void *tag)
  * dbuf_rele()-->dbuf_rele_and_unlock()-->dbuf_evict_notify()
  *	^						|
  *	|						|
- *	+-----dbuf_destroy()<--dbuf_evict()<------------+
+ *	+-----dbuf_destroy()<--dbuf_evict_one()<--------+
  *
  */
 void
@@ -5761,8 +5774,5 @@ ZFS_MODULE_PARAM(zfs_dbuf, dbuf_, metadata_cache_shift, UINT, ZMOD_RW,
 ZFS_MODULE_PARAM(zfs_dbuf, dbuf_, mutex_cache_shift, UINT, ZMOD_RD,
 	"Set size of dbuf cache mutex array as log2 shift.");
 
-ZFS_MODULE_PARAM(zfs_arc, dbuf_, evict_threads, UINT, ZMOD_RW,
-	"Controls the number of dbuf eviction threads");
-
-ZFS_MODULE_PARAM(zfs_arc, dbuf_, evict_threads_max, UINT, ZMOD_RD,
-	"The number of allocated dbuf eviction threads");
+ZFS_MODULE_PARAM(zfs_dbuf, dbuf_, evict_threads, UINT, ZMOD_RD,
+	"Number of threads used to evict from the dbuf cache");
