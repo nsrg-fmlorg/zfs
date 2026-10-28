@@ -30,23 +30,28 @@ jobs:
       - uses: vmactions/netbsd-vm@v1
         with:
           release: '11.0'
-          # The image has pkg_add but not pkgin.
+          # nvmm first, so its answer survives a failed package install.
+          # The image has pkg_add but not pkgin, and no X sets, which the
+          # qemu package's SDL2 dependency pulls in.  (Paths below are in
+          # the NetBSD guest.)
           prepare: |
-            cat /etc/pkg_install.conf || true
-            /usr/sbin/pkg_add qemu || /usr/sbin/pkg_add -v qemu
-          run: |
             uname -a
-            sysctl hw.model machdep.cpu_brand 2>/dev/null || true
-            dmesg | grep -i -E 'vmx|svm|nvmm|virtuali' || true
+            dmesg | grep -i -E 'cpu0|svm|vmx|nvmm|virtuali' | head -20 || true
             modstat | grep -i nvmm || modload nvmm || true
             modstat | grep -i nvmm || true
             ls -l /dev/nvmm || true
             nvmmctl identify || true
+            v=$(uname -r)
+            ftp -o /var/tmp/xbase.tar.xz \
+              "https://cdn.NetBSD.org/pub/NetBSD/NetBSD-$v/amd64/binary/sets/xbase.tar.xz"
+            tar -xpf /var/tmp/xbase.tar.xz -C /
+            /usr/sbin/pkg_add qemu
+          run: |
             qemu-system-x86_64 -accel help || true
             # No disk: SeaBIOS runs and finds nothing to boot.  An accel
             # that fails to start exits at once with an error; one that
             # works is still running when timeout(1) stops it (124).
             timeout 15 qemu-system-x86_64 -accel nvmm -M q35 -m 256 \
-                -display none -serial file:/tmp/seabios.log -no-reboot
+                -display none -serial file:/var/tmp/seabios.log -no-reboot
             echo "qemu exit: $?"
-            head -c 2000 /tmp/seabios.log || true
+            head -c 2000 /var/tmp/seabios.log || true
