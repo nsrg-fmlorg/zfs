@@ -1,8 +1,9 @@
 name: nvmm-probe
 
-# Can NVMM run nested on a GitHub runner?  The runner side reports what
-# KVM exposes; the NetBSD guest (vmactions, KVM with -cpu host) then
-# tries to load nvmm and start a qemu guest on it.
+# QD=1 virtio-blk cost under NVMM, against KVM on the same runner.
+# NVMM loads nested only when the runner is AMD (on the Intel runners
+# modload nvmm answers "Not supported"), and the runner CPU cannot be
+# chosen, so three identical jobs start and those on Intel stop early.
 
 on:
   push:
@@ -15,53 +16,56 @@ concurrency:
 
 jobs:
   probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        try: [1, 2, 3]
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 45
     steps:
       - name: Runner virtualisation
+        id: cpu
         run: |
           lscpu | grep -E 'Model name|Vendor|Virtualization|Hypervisor'
-          grep -o -w -E 'vmx|svm' /proc/cpuinfo | sort | uniq -c || true
           for m in kvm_intel kvm_amd; do
             f=/sys/module/$m/parameters/nested
             [ -r "$f" ] && echo "$m nested=$(cat "$f")"
           done
-          ls -l /dev/kvm
+          if grep -q -w svm /proc/cpuinfo; then
+            echo "amd=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Intel runner, NVMM does not load nested here"
+          fi
+      - uses: actions/checkout@v4
+        if: steps.cpu.outputs.amd == 'true'
+      - name: Build guest
+        if: steps.cpu.outputs.amd == 'true'
+        run: |
+          sudo apt-get install -y -q qemu-system-x86 >/dev/null
+          .github/nsrg/nvmm/mkguest.sh guest
+      - name: KVM reference
+        if: steps.cpu.outputs.amd == 'true'
+        run: .github/nsrg/nvmm/run-kvm.sh guest
       - uses: vmactions/netbsd-vm@v1
+        if: steps.cpu.outputs.amd == 'true'
         with:
           release: '11.0'
           cpu: 2
-          # nvmm first, so its answer survives a failed package install.
           # The image has pkg_add but not pkgin, and no X sets, which the
           # qemu package's SDL2 dependency pulls in.  (Paths below are in
           # the NetBSD guest.)
           prepare: |
-            uname -a
-            dmesg | grep -i -E 'cpu0|svm|vmx|nvmm|virtuali' | head -20 || true
-            modstat | grep -i nvmm || modload nvmm || true
-            modstat | grep -i nvmm || true
-            ls -l /dev/nvmm || true
-            nvmmctl identify || true
+            modload nvmm
+            nvmmctl identify
             v=$(uname -r)
             ftp -o /var/tmp/xbase.tar.xz \
               "https://cdn.NetBSD.org/pub/NetBSD/NetBSD-$v/amd64/binary/sets/xbase.tar.xz"
             tar -xpf /var/tmp/xbase.tar.xz -C /
             /usr/sbin/pkg_add qemu
-          # The first try wedged the NetBSD VM itself (ssh timed out) right
-          # after nvmm reported operational.  Run qemu in the background
-          # and look from outside, to tell a stuck L3 guest from a stuck
-          # L2 host.
-          run: |
-            (timeout 20 qemu-system-x86_64 -accel nvmm -M q35 -m 256 \
-                -smp 1 -display none -serial file:/var/tmp/seabios.log \
-                -no-reboot > /var/tmp/qemu.out 2>&1; \
-                echo "qemu exit: $?" >> /var/tmp/qemu.out) &
-            for i in 1 2 3 4 5 6; do
-              sleep 5
-              echo "t=$((i * 5))s load: $(uptime | sed 's/.*load/load/')"
-              ps -axo pid,stat,time,command | grep '[q]emu-system' || true
-            done
-            wait
-            cat /var/tmp/qemu.out
-            head -c 2000 /var/tmp/seabios.log || true
-            nvmmctl list || true
+          run: .github/nsrg/nvmm/run-nvmm.sh guest
+      - name: Summary
+        if: steps.cpu.outputs.amd == 'true' && always()
+        run: |
+          .github/nsrg/nvmm/summary.sh guest/kvm.serial guest/nvmm.serial |
+              tee -a "$GITHUB_STEP_SUMMARY"
+          tail -n 40 guest/nvmm.serial || true
