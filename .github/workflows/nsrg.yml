@@ -109,4 +109,7 @@ jobs:
         if: always()
         with:
           name: bench
-          path: /var/tmp/bench
+          path: |
+            /var/tmp/bench
+            /var/tmp/qd1
+          if-no-files-found: ignore

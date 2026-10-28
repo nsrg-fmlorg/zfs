@@ -8,6 +8,12 @@
 # cost of the code path (eviction, copies, checksums), not of a disk.
 set -eu
 
+# A branch that measures something other than an A/B names its own
+# script in .github/nsrg/bench-script.
+if [ -s .github/nsrg/bench-script ]; then
+	exec "./.github/nsrg/$(cat .github/nsrg/bench-script)"
+fi
+
 : "${BASE:?set BASE to the ref to compare against}"
 OUT=/var/tmp/bench
 HERE=$(pwd)
