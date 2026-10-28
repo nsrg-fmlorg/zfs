@@ -941,7 +941,7 @@ zil_replay_func_t *const zvol_replay_vector[TX_MAX_TYPE] = {
  */
 void
 zvol_log_write(zvol_state_t *zv, dmu_tx_t *tx, uint64_t offset,
-    uint64_t size, boolean_t commit)
+    uint64_t size, boolean_t commit, boolean_t o_direct)
 {
 	uint32_t blocksize = zv->zv_volblocksize;
 	zilog_t *zilog = zv->zv_zilog;
@@ -951,7 +951,7 @@ zvol_log_write(zvol_state_t *zv, dmu_tx_t *tx, uint64_t offset,
 	if (zil_replaying(zilog, tx))
 		return;
 
-	write_state = zil_write_state(zilog, size, blocksize, B_FALSE, commit);
+	write_state = zil_write_state(zilog, size, blocksize, o_direct, commit);
 
 	while (size) {
 		itx_t *itx;

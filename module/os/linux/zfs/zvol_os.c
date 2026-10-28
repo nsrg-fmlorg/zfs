@@ -31,6 +31,7 @@
 #include <sys/spa_impl.h>
 #include <sys/zvol.h>
 #include <sys/zvol_impl.h>
+#include <sys/uio_impl.h>
 #include <cityhash.h>
 
 #include <linux/blkdev_compat.h>
@@ -179,6 +180,34 @@ zvol_os_is_zvol(const char *path)
 	return (B_FALSE);
 }
 
+/*
+ * Choose how a request reaches the DMU under the zvol's direct property,
+ * after zfs_setup_direct() for files.  A block device has no O_DIRECT of
+ * its own: the flag stops at the page cache above us, and people set it to
+ * avoid that cache, not the ARC.  So only direct=always changes anything.
+ * It sends page-aligned requests (and writes of at least a block) straight
+ * to disk from the bio's own pages, and the rest through the ARC uncached.
+ * With zfs_dio_enabled=0 everything it covers goes uncached.
+ */
+static dmu_flags_t
+zvol_setup_direct(zvol_state_t *zv, zfs_uio_t *uio, zfs_uio_rw_t rw)
+{
+	if (zv->zv_objset->os_direct != ZFS_DIRECT_ALWAYS ||
+	    zfs_uio_resid(uio) == 0)
+		return (0);
+
+	if (!zfs_dio_enabled || !zfs_uio_aligned(uio, PAGE_SIZE) ||
+	    (rw == UIO_WRITE &&
+	    (uint64_t)zfs_uio_resid(uio) < zv->zv_volblocksize))
+		return (DMU_UNCACHEDIO);
+
+	/* Refused when a bio_vec does not cover whole pages. */
+	if (zfs_uio_get_dio_pages_alloc(uio, rw) != 0)
+		return (DMU_UNCACHEDIO);
+
+	return (DMU_DIRECTIO);
+}
+
 static void
 zvol_write(zv_request_t *zvr)
 {
@@ -235,6 +264,10 @@ zvol_write(zv_request_t *zvr)
 	boolean_t sync =
 	    io_is_fua(bio, rq) || zv->zv_objset->os_sync == ZFS_SYNC_ALWAYS;
 
+	dmu_flags_t dflags = DMU_READ_PREFETCH |
+	    zvol_setup_direct(zv, &uio, UIO_WRITE);
+	boolean_t o_direct = (dflags & DMU_DIRECTIO) != 0;
+
 	zfs_locked_range_t *lr = zfs_rangelock_enter(&zv->zv_rangelock,
 	    uio.uio_loffset, uio.uio_resid, RL_WRITER);
 
@@ -255,17 +288,18 @@ zvol_write(zv_request_t *zvr)
 			dmu_tx_abort(tx);
 			break;
 		}
-		error = dmu_write_uio_dnode(zv->zv_dn, &uio, bytes, tx,
-		    DMU_READ_PREFETCH);
-		if (error == 0) {
-			zvol_log_write(zv, tx, off, bytes, sync);
-		}
+		error = dmu_write_uio_dnode(zv->zv_dn, &uio, bytes, tx, dflags);
+		if (error == 0)
+			zvol_log_write(zv, tx, off, bytes, sync, o_direct);
 		dmu_tx_commit(tx);
 
 		if (error)
 			break;
 	}
 	zfs_rangelock_exit(lr);
+
+	if (uio.uio_extflg & UIO_DIRECT)
+		zfs_uio_free_dio_pages(&uio, UIO_WRITE);
 
 	int64_t nwritten = start_resid - uio.uio_resid;
 	dataset_kstats_update_write_kstats(&zv->zv_kstat, nwritten);
@@ -412,6 +446,9 @@ zvol_read(zv_request_t *zvr)
 			    bio);
 	}
 
+	dmu_flags_t dflags = DMU_READ_PREFETCH |
+	    zvol_setup_direct(zv, &uio, UIO_READ);
+
 	zfs_locked_range_t *lr = zfs_rangelock_enter(&zv->zv_rangelock,
 	    uio.uio_loffset, uio.uio_resid, RL_READER);
 
@@ -424,9 +461,20 @@ zvol_read(zv_request_t *zvr)
 		if (bytes > volsize - uio.uio_loffset)
 			bytes = volsize - uio.uio_loffset;
 
-		error = dmu_read_uio_dnode(zv->zv_dn, &uio, bytes,
-		    DMU_READ_PREFETCH);
+		error = dmu_read_uio_dnode(zv->zv_dn, &uio, bytes, dflags);
 		if (error) {
+			/*
+			 * A Direct I/O read that fails its checksum may only
+			 * mean the pages changed while the read was in
+			 * flight.  Read the rest through the ARC, which also
+			 * repairs real damage, as zfs_read() does.
+			 */
+			if (error == ECKSUM && (dflags & DMU_DIRECTIO)) {
+				dflags &= ~(dmu_flags_t)DMU_DIRECTIO;
+				dflags |= DMU_UNCACHEDIO;
+				error = 0;
+				continue;
+			}
 			/* convert checksum errors into IO errors */
 			if (error == ECKSUM)
 				error = SET_ERROR(EIO);
@@ -434,6 +482,9 @@ zvol_read(zv_request_t *zvr)
 		}
 	}
 	zfs_rangelock_exit(lr);
+
+	if (uio.uio_extflg & UIO_DIRECT)
+		zfs_uio_free_dio_pages(&uio, UIO_READ);
 
 	int64_t nread = start_resid - uio.uio_resid;
 	dataset_kstats_update_read_kstats(&zv->zv_kstat, nread);

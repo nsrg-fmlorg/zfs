@@ -29,7 +29,7 @@
 .\" Copyright (c) 2019, Kjeld Schouten-Lebbing
 .\" Copyright (c) 2022 Hewlett Packard Enterprise Development LP.
 .\"
-.Dd September 9, 2026
+.Dd October 29, 2026
 .Dt ZFSPROPS 7
 .Os
 .
@@ -1134,7 +1134,19 @@ Furthermore, if an application uses
 .Xr mmap 2
 based file access then in order to maintain coherency all direct requests
 are converted to buffered requests while the file is mapped.
-Currently Direct I/O is not supported with zvols.
+.Pp
+On a volume, only
+.Sy always
+has an effect, and only on Linux.
+.Dv O_DIRECT
+on the volume's device bypasses the page cache above it but not the ARC,
+whatever this property is set to.
+With
+.Sy always ,
+requests whose offset and size are page-aligned, and whose buffers cover
+whole pages, are read or written directly, writes of at least
+.Sy volblocksize
+only; other requests go through the ARC without being kept in it.
 If dedup is enabled on a dataset, Direct I/O writes will not check for
 deduplication.
 Deduplication and Direct I/O writes are currently incompatible.
