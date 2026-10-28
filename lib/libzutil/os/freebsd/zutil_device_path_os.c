@@ -78,9 +78,14 @@ zfs_dev_is_whole_disk(const char *dev_name)
 		return (B_FALSE);
 	}
 
+	/*
+	 * g_open() succeeds on any disk-like device node; only one with a
+	 * GEOM provider behind it is a disk vdev.  The name is strdup()ed.
+	 */
 	name = g_providername(fd);
 	if (name != NULL) {
 		wholedisk = B_TRUE;
+		free(name);
 	}
 
 	g_close(fd);
