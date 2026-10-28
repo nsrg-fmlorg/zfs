@@ -328,14 +328,27 @@ zvol_discard(zv_request_t *zvr)
 	}
 
 	/*
-	 * Align the request to volume block boundaries. This will prevent
+	 * Align a discard to volume block boundaries. This will prevent
 	 * dnode_free_range() from zeroing out the unaligned parts which is
 	 * slow (read-modify-write) and useless since we are not freeing any
-	 * space by doing so.
+	 * space by doing so.  A write-zeroes must leave the whole range
+	 * reading as zeroes, so it keeps the unaligned parts and lets
+	 * dnode_free_range() zero them.
+	 *
+	 * REQ_NOUNMAP is ignored and the range freed anyway.  It asks that
+	 * the blocks stay allocated so later writes cannot run out of space,
+	 * which copy-on-write cannot give: an overwrite allocates a new block
+	 * wherever the old one was, so writing zeroes would reserve nothing.
+	 * Files are treated the same way: zpl_fallocate_common() frees a
+	 * FALLOC_FL_ZERO_RANGE with zfs_space(F_FREESP), and its preallocate
+	 * mode only checks for free space.  Space for later writes is what
+	 * refreservation guarantees, and freeing the range leaves it intact.
 	 */
-	start = P2ROUNDUP(start, zv->zv_volblocksize);
-	end = P2ALIGN_TYPED(end, zv->zv_volblocksize, uint64_t);
-	size = end - start;
+	if (!io_is_write_zeroes(bio, rq)) {
+		start = P2ROUNDUP(start, zv->zv_volblocksize);
+		end = P2ALIGN_TYPED(end, zv->zv_volblocksize, uint64_t);
+		size = end - start;
+	}
 
 	if (start >= end)
 		goto unlock;
@@ -467,7 +480,8 @@ zvol_read_task(void *arg)
 #define	ZVOL_OP_IS_WRITE(op) \
 	(op == REQ_OP_WRITE || \
 	op == REQ_OP_FLUSH || \
-	op == REQ_OP_DISCARD)
+	op == REQ_OP_DISCARD || \
+	op == REQ_OP_WRITE_ZEROES)
 
 /* Is this IO type supported by zvols? */
 #define	ZVOL_OP_IS_SUPPORTED(op) (op == REQ_OP_READ || ZVOL_OP_IS_WRITE(op))
@@ -622,7 +636,7 @@ zvol_request_impl(zvol_state_t *zv, struct bio *bio, struct request *rq,
 		 * interfaces lack this functionality (they block waiting for
 		 * the i/o to complete).
 		 */
-		if (io_is_discard(bio, rq)) {
+		if (io_is_discard(bio, rq) || io_is_write_zeroes(bio, rq)) {
 			if (force_sync) {
 				zvol_discard(&zvr);
 			} else {
@@ -1135,6 +1149,7 @@ typedef struct zvol_queue_limits {
 	unsigned int	zql_physical_block_size;
 	unsigned int	zql_max_discard_sectors;
 	unsigned int	zql_discard_granularity;
+	unsigned int	zql_max_write_zeroes_sectors;
 } zvol_queue_limits_t;
 
 static void
@@ -1206,6 +1221,7 @@ zvol_queue_limits_init(zvol_queue_limits_t *limits, zvol_state_t *zv,
 	limits->zql_max_discard_sectors =
 	    (zvol_max_discard_blocks * zv->zv_volblocksize) >> 9;
 	limits->zql_discard_granularity = zv->zv_volblocksize;
+	limits->zql_max_write_zeroes_sectors = limits->zql_max_discard_sectors;
 }
 
 #ifdef HAVE_BLK_ALLOC_DISK_2ARG
@@ -1222,6 +1238,13 @@ zvol_queue_limits_convert(zvol_queue_limits_t *limits,
 	qlimits->max_discard_sectors = limits->zql_max_discard_sectors;
 	qlimits->max_hw_discard_sectors = limits->zql_max_discard_sectors;
 	qlimits->discard_granularity = limits->zql_discard_granularity;
+	qlimits->max_write_zeroes_sectors =
+	    limits->zql_max_write_zeroes_sectors;
+#ifdef HAVE_BLKDEV_QUEUE_LIMITS_WZEROES_UNMAP
+	/* Write-zeroes frees the range rather than writing it. */
+	qlimits->max_hw_wzeroes_unmap_sectors =
+	    limits->zql_max_write_zeroes_sectors;
+#endif
 #ifdef HAVE_BLKDEV_QUEUE_LIMITS_FEATURES
 	qlimits->features =
 	    BLK_FEAT_WRITE_CACHE | BLK_FEAT_FUA | BLK_FEAT_IO_STAT;
@@ -1241,6 +1264,8 @@ zvol_queue_limits_apply(zvol_queue_limits_t *limits,
 	blk_queue_physical_block_size(queue, limits->zql_physical_block_size);
 	blk_queue_max_discard_sectors(queue, limits->zql_max_discard_sectors);
 	blk_queue_discard_granularity(queue, limits->zql_discard_granularity);
+	blk_queue_max_write_zeroes_sectors(queue,
+	    limits->zql_max_write_zeroes_sectors);
 #endif
 #ifndef HAVE_BLKDEV_QUEUE_LIMITS_FEATURES
 	blk_queue_set_write_cache(queue, B_TRUE);
