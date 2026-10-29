@@ -1,0 +1,41 @@
+name: ztest-import
+
+# Experiment for wip/ztest-import only: does ztest_import_impl() fail
+# exactly when /dev/zfs is absent, and is it independent of ASan?
+
+on:
+  push:
+    branches: ['wip/ztest-import']
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - run: .github/nsrg/deps.sh
+      # Debug build of the whole tree: userspace and the kernel module.
+      - run: .github/nsrg/build.sh . debug
+      - name: debug, no /dev/zfs
+        run: sudo .github/nsrg/ztest-import.sh debug-nodev
+      - run: .github/nsrg/load.sh .
+      - name: debug, /dev/zfs present
+        run: sudo .github/nsrg/ztest-import.sh debug-dev
+      # Userspace again under the sanitizers, as the sanitize job builds
+      # it; the module loaded above stays loaded across the clean.
+      - run: git clean -fdxq && .github/nsrg/build.sh . sanitize
+      - name: sanitize, /dev/zfs present
+        run: sudo .github/nsrg/ztest-import.sh asan-dev
+      - run: sudo scripts/zfs.sh -u
+      - name: sanitize, no /dev/zfs
+        run: sudo .github/nsrg/ztest-import.sh asan-nodev
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ztest-import
+          path: /var/tmp/zti-*/*.log

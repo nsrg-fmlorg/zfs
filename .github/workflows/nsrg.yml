@@ -14,7 +14,7 @@ name: nsrg
 
 on:
   push:
-    branches: ['wip/**', 'nsrg/**']
+    branches: ['wip/**', 'nsrg/**', '!wip/ztest-import']
   workflow_dispatch:
     inputs:
       tags:
