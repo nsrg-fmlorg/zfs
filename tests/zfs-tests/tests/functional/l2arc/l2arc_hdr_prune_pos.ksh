@@ -171,11 +171,18 @@ log_must test $(kstat arcstats.l2_cksum_bad) -eq $cksum_bad
 log_must test $(kstat arcstats.l2_io_error) -eq $io_error
 
 # A small budget keeps every device's scan part way through its buffer list
-# while the operations run.
-log_must set_tunable64 L2ARC_HDR_PRUNE_BUDGET 16
+# while the operations run.  The budget also counts the headers of the file
+# just read back, which have an L1 part and are kept, and the scan may meet
+# all of them before the first L2ARC-only one: up to fill_mb of recsize
+# records spread over the devices, at one feed iteration per second.
+typeset prune_budget=16
+typeset -i kept_secs=$(( fill_mb * 1024 * 1024 / recsize / ndevs /
+    prune_budget ))
+log_must set_tunable64 L2ARC_HDR_PRUNE_BUDGET $prune_budget
 pruned=$(kstat arcstats.l2_hdr_pruned)
 log_must set_tunable32 L2ARC_META_PERCENT 0
-log_must wait_arcstat l2_hdr_pruned -gt $(( pruned + ndevs * 64 )) 60
+log_must wait_arcstat l2_hdr_pruned -gt $(( pruned + ndevs * 64 )) \
+    $(( kept_secs + 60 ))
 
 # The reopen on online evicts the device, which removes its marker.
 log_must zpool offline $TESTPOOL $VDIR/cache0
