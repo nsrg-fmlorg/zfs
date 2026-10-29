@@ -184,3 +184,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: .github/nsrg/oldkernel.sh
+
+  zts-base:
+    # The fault tests ZED drives failed on this branch; run the same
+    # tags on upstream master on the same kind of runner, to tell a
+    # regression from the runner.
+    if: github.ref == 'refs/heads/wip/pr18854'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - run: .github/nsrg/deps.sh
+      - run: |
+          git clone -q --depth 1 https://github.com/openzfs/zfs.git /var/tmp/base
+          cp -r .github/nsrg /var/tmp/base/.github/
+      - run: .github/nsrg/build.sh /var/tmp/base debug
+      - run: cd /var/tmp/base && .github/nsrg/zts.sh
+        env:
+          TAGS: fault
