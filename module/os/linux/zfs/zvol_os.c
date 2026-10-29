@@ -88,6 +88,13 @@ zvol_end_io(struct bio *bio, struct request *rq, int error)
 static unsigned int zvol_blk_mq_queue_depth = BLKDEV_DEFAULT_RQ;
 static unsigned int zvol_actual_blk_mq_queue_depth;
 
+/*
+ * Run a request in the submitting thread when nothing else is in flight
+ * on its zvol, as zvol_request_sync does for every request.  See
+ * zvol_request_idle().
+ */
+static unsigned int zvol_request_sync_idle = 0;
+
 struct zvol_state_os {
 	struct gendisk		*zvo_disk;	/* generic disk */
 	struct request_queue	*zvo_queue;	/* request queue */
@@ -97,7 +104,24 @@ struct zvol_state_os {
 
 	/* Set from the global 'zvol_use_blk_mq' at zvol load */
 	boolean_t use_blk_mq;
+
+	/* Requests counted by zvol_request_idle() and not yet ended */
+	uint32_t zso_inflight;
 };
+
+/*
+ * End a request that zvol_request_impl() passed to zvol_read(),
+ * zvol_write() or zvol_discard().  The in-flight count drops before the
+ * bio completes, so that the submitter's next request, which can follow
+ * at once, finds the zvol idle.
+ */
+static inline void
+zvol_request_end(zv_request_t *zvr, int error)
+{
+	if (zvr->counted)
+		atomic_dec_32(&zvr->zv->zv_zso->zso_inflight);
+	zvol_end_io(zvr->bio, zvr->rq, error);
+}
 
 static struct ida zvol_ida;
 
@@ -233,7 +257,7 @@ zvol_write(zv_request_t *zvr)
 		error = zil_commit(zv->zv_zilog, ZVOL_OBJ);
 		if (error != 0) {
 			rw_exit(&zv->zv_suspend_lock);
-			zvol_end_io(bio, rq, -error);
+			zvol_request_end(zvr, -error);
 			return;
 		}
 	}
@@ -241,7 +265,7 @@ zvol_write(zv_request_t *zvr)
 	/* Some requests are just for flush and nothing else. */
 	if (io_size(bio, rq) == 0) {
 		rw_exit(&zv->zv_suspend_lock);
-		zvol_end_io(bio, rq, 0);
+		zvol_request_end(zvr, 0);
 		return;
 	}
 
@@ -314,7 +338,7 @@ zvol_write(zv_request_t *zvr)
 		blk_generic_end_io_acct(q, disk, WRITE, bio, start_time);
 	}
 
-	zvol_end_io(bio, rq, error);
+	zvol_request_end(zvr, error);
 }
 
 static void
@@ -401,7 +425,7 @@ unlock:
 		    start_time);
 	}
 
-	zvol_end_io(bio, rq, error);
+	zvol_request_end(zvr, error);
 }
 
 static void
@@ -496,7 +520,7 @@ zvol_read(zv_request_t *zvr)
 		blk_generic_end_io_acct(q, disk, READ, bio, start_time);
 	}
 
-	zvol_end_io(bio, rq, error);
+	zvol_request_end(zvr, error);
 }
 
 static void
@@ -535,6 +559,25 @@ zvol_read_task(void *arg)
  * force_sync:	Set to 0 to defer processing to a background taskq
  *			Set to 1 to process data synchronously
  */
+/*
+ * With zvol_request_sync_idle set, decide whether a request finds its
+ * zvol idle and can run in the submitting thread.  At queue depth 1,
+ * which is what a VM guest often issues, the taskq hand-off and the
+ * wakeup that follows it are pure latency.  Once requests overlap they
+ * go to the taskq as before, so that a single submitting thread (an
+ * iSCSI target, say) can still keep many in flight, which is what makes
+ * zvol_request_sync=1 slow for it.
+ */
+static boolean_t
+zvol_request_idle(zv_request_t *zvr)
+{
+	if (zvol_request_sync_idle == 0)
+		return (B_FALSE);
+
+	zvr->counted = B_TRUE;
+	return (atomic_inc_32_nv(&zvr->zv->zv_zso->zso_inflight) == 1);
+}
+
 static void
 zvol_request_impl(zvol_state_t *zv, struct bio *bio, struct request *rq,
     boolean_t force_sync)
@@ -643,6 +686,9 @@ zvol_request_impl(zvol_state_t *zv, struct bio *bio, struct request *rq,
 			rw_downgrade(&zv->zv_suspend_lock);
 		}
 
+		if (!force_sync && zvol_request_idle(&zvr))
+			force_sync = B_TRUE;
+
 		/*
 		 * We don't want this thread to be blocked waiting for i/o to
 		 * complete, so we instead wait from a taskq callback. The
@@ -702,6 +748,9 @@ zvol_request_impl(zvol_state_t *zv, struct bio *bio, struct request *rq,
 		}
 
 		rw_enter(&zv->zv_suspend_lock, RW_READER);
+
+		if (!force_sync && zvol_request_idle(&zvr))
+			force_sync = B_TRUE;
 
 		/* See comment in WRITE case above. */
 		if (force_sync) {
@@ -1954,6 +2003,10 @@ MODULE_PARM_DESC(zvol_blk_mq_queue_depth, "Default blk-mq queue depth");
 
 module_param(zvol_use_blk_mq, uint, 0644);
 MODULE_PARM_DESC(zvol_use_blk_mq, "Use the blk-mq API for zvols");
+
+module_param(zvol_request_sync_idle, uint, 0644);
+MODULE_PARM_DESC(zvol_request_sync_idle,
+	"Handle a request synchronously when its zvol has none in flight");
 
 module_param(zvol_blk_mq_blocks_per_thread, uint, 0644);
 MODULE_PARM_DESC(zvol_blk_mq_blocks_per_thread,
