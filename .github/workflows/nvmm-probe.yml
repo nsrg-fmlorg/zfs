@@ -22,7 +22,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        release: ['10.1', '11.0']
+        release: ['11.0']
         try: [1, 2, 3]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -75,4 +75,8 @@ jobs:
         run: |
           .github/nsrg/nvmm/summary.sh guest/kvm.serial guest/nvmm.serial |
               tee -a "$GITHUB_STEP_SUMMARY"
-          tail -n 40 guest/nvmm.serial || true
+          # anyvm logs the NetBSD VM's own console here: whether the VM
+          # panicked into ddb or simply stopped answering after the nvmm
+          # guest started.
+          find /home/runner/work/_actions/vmactions -name '*.serial.log' \
+              -exec tail -n 80 {} \; || true
