@@ -70,7 +70,10 @@ measure() {
 	echo "$ARC_MAX" | sudo tee /sys/module/zfs/parameters/zfs_arc_max \
 	    >/dev/null
 	record_params "$label"
-	sudo truncate -s 8G /dev/shm/vdev
+	# /dev/shm is capped at half of RAM (8G on the runner), and a file
+	# vdev never gives freed space back to tmpfs, so a vdev that size
+	# can fill tmpfs, fail its writes and suspend the pool.
+	sudo truncate -s 6G /dev/shm/vdev
 	sudo "$src"/zpool create -f -O compression=off -O recordsize=1M \
 	    -O atime=off bench /dev/shm/vdev
 	sudo fio --name=fill --directory=/bench --size=4G --rw=write \
