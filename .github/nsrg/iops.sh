@@ -55,43 +55,6 @@ fio_iops() {
 	    jq '(.jobs[0].read.iops + .jobs[0].write.iops) | floor'
 }
 
-# Whether ZFS completes libaio requests before io_submit() returns, which
-# would hold every job to one I/O in flight whatever iodepth says: sweep
-# the depth and the number of jobs, on ZFS and on the raw devices, and
-# count context switches per I/O.
-concurrency() {
-	# shellcheck disable=SC2046
-	sudo "$HERE"/zpool create -f -o ashift=12 -O compression=off \
-	    -O primarycache=metadata -O recordsize=4k -O atime=off \
-	    iops $(first $NDEV)
-	sudo fio --name=t --directory=/iops --size=64M --numjobs=64 \
-	    --rw=write --bs=1M --end_fsync=1 >/dev/null
-	raw4=$(first $NDEV | sed 's/ $//; s/ /:/g')
-	for jobs in 4 16 64; do
-		for qd in 1 32; do
-			for rw in randread randwrite; do
-				z=$(fio_iops $rw --directory=/iops --size=64M \
-				    --numjobs=$jobs --iodepth=$qd --thread)
-				record conc_zfs $NDEV "j$jobs" "$rw/qd$qd" 1 "$z"
-				r=$(fio_iops $rw --filename="$raw4" \
-				    --numjobs=$jobs --iodepth=$qd --thread)
-				record conc_raw $NDEV "j$jobs" "$rw/qd$qd" 1 "$r"
-			done
-		done
-	done
-	for rw in randread randwrite; do
-		sudo perf stat -a -e context-switches -x, -o "$OUT"/cs-$rw.txt \
-		    -- sleep 10 &
-		n=$(fio_iops $rw --directory=/iops --size=64M --numjobs=64 \
-		    --iodepth=1 --thread --runtime=12)
-		wait
-		cs=$(sudo grep context-switches "$OUT"/cs-$rw.txt | cut -d, -f1)
-		sudo chmod a+r "$OUT"/cs-$rw.txt
-		echo "$rw j64 qd1: $n IOPS, $cs context switches in 10s," \
-		    "$((cs / (n * 10 + 1))) per I/O" | tee -a "$OUT"/env
-	done
-	sudo "$HERE"/zpool destroy iops
-}
 
 record() {	# record <label> <vdevs> <sched> <rw> <round> <iops>
 	printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$@" | tee -a "$OUT"/iops.tsv
@@ -109,6 +72,55 @@ raw_baseline() {
 			done
 		done
 	done
+}
+
+# Whether ZFS completes libaio requests before io_submit() returns, which
+# would hold every job to one I/O in flight whatever iodepth says: sweep
+# the depth and the number of jobs, on the raw devices first and on ZFS
+# afterwards (never both at once: raw writes would overwrite the pool),
+# and count context switches per I/O.
+concurrency_raw() {
+	raw4=$(first $NDEV | sed 's/ $//; s/ /:/g')
+	for jobs in 4 16 64; do
+		for qd in 1 32; do
+			for rw in randread randwrite; do
+				record conc_raw $NDEV "j$jobs" "$rw/qd$qd" 1 \
+				    "$(fio_iops $rw --filename="$raw4" \
+				    --numjobs=$jobs --iodepth=$qd --thread)"
+			done
+		done
+	done
+}
+
+concurrency_zfs() {
+	# shellcheck disable=SC2046
+	sudo "$HERE"/zpool create -f -o ashift=12 -O compression=off \
+	    -O primarycache=metadata -O recordsize=4k -O atime=off \
+	    iops $(first $NDEV)
+	sudo fio --name=t --directory=/iops --size=64M --numjobs=64 \
+	    --rw=write --bs=1M --end_fsync=1 >/dev/null
+	for jobs in 4 16 64; do
+		for qd in 1 32; do
+			for rw in randread randwrite; do
+				record conc_zfs $NDEV "j$jobs" "$rw/qd$qd" 1 \
+				    "$(fio_iops $rw --directory=/iops \
+				    --size=64M --numjobs=$jobs --iodepth=$qd \
+				    --thread)"
+			done
+		done
+	done
+	for rw in randread randwrite; do
+		sudo perf stat -a -e context-switches -x, -o "$OUT"/cs-$rw.txt \
+		    -- sleep 10 &
+		n=$(fio_iops $rw --directory=/iops --size=64M --numjobs=64 \
+		    --iodepth=1 --thread --runtime=12)
+		wait
+		cs=$(sudo grep context-switches "$OUT"/cs-$rw.txt | cut -d, -f1)
+		sudo chmod a+r "$OUT"/cs-$rw.txt
+		echo "$rw j64 qd1: $n IOPS, $cs context switches in 10s," \
+		    "$((cs / (n * 10 + 1))) per I/O" | tee -a "$OUT"/env
+	done
+	sudo "$HERE"/zpool destroy iops
 }
 
 # zfs_run <label> <vdevs> <scheduler>
@@ -191,16 +203,16 @@ taskq_variants() {
 
 setup_devices
 raw_baseline
+concurrency_raw
 "$HERE"/.github/nsrg/load.sh "$HERE"
 echo $((1024 * 1024 * 1024)) |
     sudo tee /sys/module/zfs/parameters/zfs_arc_max >/dev/null
 zfs_run aa 4 auto		# A/A partner of the zfs/4/auto row below
-for sched in auto on off; do
-	for n in 1 2 4; do
-		zfs_run zfs "$n" "$sched"
-	done
+# Runs 1 and 2 found scheduler=on/off within 3% of auto; keep auto only.
+for n in 1 2 4; do
+	zfs_run zfs "$n" auto
 done
-concurrency
+concurrency_zfs
 bypass_check
 profile
 taskq_variants
