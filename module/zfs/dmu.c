@@ -1614,8 +1614,7 @@ dmu_read_uio_arc(dnode_t *dn, zfs_uio_t *uio, uint64_t size,
 		uint64_t bufoff, tocpy;
 		dmu_buf_impl_t *db;
 		arc_buf_hdr_t *hdr;
-		abd_t *view;
-		boolean_t held;
+		abd_t *abd;
 
 		if (left == 0)
 			break;
@@ -1634,9 +1633,13 @@ dmu_read_uio_arc(dnode_t *dn, zfs_uio_t *uio, uint64_t size,
 			break;
 		}
 		tocpy = MIN(db->db.db_size - bufoff, left);
-		held = dbuf_hold_arc_range(db, bufoff, tocpy, &view, &hdr,
-		    FTAG);
-		if (!held) {
+		if (!dbuf_hold_arc_abd(db, &abd, &hdr, FTAG)) {
+			*heldp = db;
+			break;
+		}
+		if (abd_get_size(abd) != db->db.db_size) {
+			/* The block in the ARC is not the size of this dbuf. */
+			arc_rele_abd(hdr, FTAG);
 			*heldp = db;
 			break;
 		}
@@ -1649,9 +1652,9 @@ dmu_read_uio_arc(dnode_t *dn, zfs_uio_t *uio, uint64_t size,
 		 * path redo the rest of the read, which is allowed to fault.
 		 */
 		zfs_uio_fault_disable(uio, B_TRUE);
-		err = abd_iterate_func(view, 0, tocpy, dmu_abd_uio_cb, uio);
+		err = abd_iterate_func(abd, bufoff, tocpy, dmu_abd_uio_cb, uio);
 		zfs_uio_fault_disable(uio, B_FALSE);
-		arc_rele_abd_range(view, hdr, FTAG);
+		arc_rele_abd(hdr, FTAG);
 
 		if (err != 0) {
 			if (err == EFAULT)

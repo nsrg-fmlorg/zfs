@@ -1456,7 +1456,7 @@ dbuf_handle_indirect_hole(void *data, dnode_t *dn, blkptr_t *dbbp)
 /*
  * Whether db reads as a hole.  This function requires that the dbuf's
  * mutex is held.  It is shared by dbuf_read_hole() and the ARC range read
- * in dbuf_hold_arc_range(), which must agree: until a txg syncs, a free is
+ * in dbuf_hold_arc_abd(), which must agree: until a txg syncs, a free is
  * known only to the dnode and bp still names the old block.
  */
 static boolean_t
@@ -1770,17 +1770,17 @@ dbuf_fix_old_data(dmu_buf_impl_t *db, uint64_t txg)
 
 /*
  * Fast path for a partial read of a block that is in the ARC but has no buffer
- * of its own in this dbuf yet.  On success the caller gets a zero-copy ABD
- * reference to [off, off + len) of the block, which it must release with
- * arc_rele_abd_range().
+ * of its own in this dbuf yet.  On success the caller gets the block's ABD in
+ * the ARC, held, to read from in place; it must release it with
+ * arc_rele_abd().
  *
  * Nothing is cached in the dbuf, so this only helps when the dbuf cache is
  * missing anyway - which is exactly when the full-record copy done by
  * dbuf_read() -> arc_buf_alloc_impl() dominates the cost of a small read.
  */
 boolean_t
-dbuf_hold_arc_range(dmu_buf_impl_t *db, uint64_t off, uint64_t len,
-    abd_t **viewp, arc_buf_hdr_t **hdrp, const void *tag)
+dbuf_hold_arc_abd(dmu_buf_impl_t *db, abd_t **abdp, arc_buf_hdr_t **hdrp,
+    const void *tag)
 {
 	blkptr_t *bp, bp_copy;
 	db_lock_type_t dblt;
@@ -1813,8 +1813,7 @@ dbuf_hold_arc_range(dmu_buf_impl_t *db, uint64_t off, uint64_t len,
 	if (!have_bp)
 		return (B_FALSE);
 
-	return (arc_hold_abd_range(db->db_objset->os_spa, &bp_copy, off, len,
-	    viewp, hdrp, tag));
+	return (arc_hold_abd(db->db_objset->os_spa, &bp_copy, abdp, hdrp, tag));
 }
 
 int

@@ -5885,11 +5885,12 @@ arc_cached(spa_t *spa, const blkptr_t *bp)
 }
 
 /*
- * Take a zero-copy reference to a range of a block that is already present in
- * the ARC in the form the caller wants it: uncompressed, unencrypted and not
- * in need of a byteswap.  Note that this is a property of the header, not of
- * the block pointer: a block that is compressed on disk qualifies whenever the
- * ARC holds it expanded, as it does when zfs_compressed_arc_enabled is off.
+ * Take a reference to a block that is already present in the ARC in the form
+ * the caller wants it: uncompressed, unencrypted and not in need of a
+ * byteswap, and hand back its b_pabd for the caller to read from.  Note that
+ * this is a property of the header, not of the block pointer: a block that is
+ * compressed on disk qualifies whenever the ARC holds it expanded, as it does
+ * when zfs_compressed_arc_enabled is off.
  *
  * This lets a reader copy out only the bytes it actually asked for.  The
  * alternative, arc_buf_alloc_impl(), has to allocate a second buffer the size
@@ -5911,8 +5912,8 @@ arc_cached(spa_t *spa, const blkptr_t *bp)
  * Returns B_FALSE if the caller has to fall back to a normal read.
  */
 boolean_t
-arc_hold_abd_range(spa_t *spa, const blkptr_t *bp, uint64_t off, uint64_t len,
-    abd_t **viewp, arc_buf_hdr_t **hdrp, const void *tag)
+arc_hold_abd(spa_t *spa, const blkptr_t *bp, abd_t **abdp,
+    arc_buf_hdr_t **hdrp, const void *tag)
 {
 	arc_buf_hdr_t *hdr;
 	kmutex_t *hash_lock;
@@ -5931,8 +5932,7 @@ arc_hold_abd_range(spa_t *spa, const blkptr_t *bp, uint64_t off, uint64_t len,
 	    (abd_is_linear(hdr->b_l1hdr.b_pabd) &&
 	    !abd_is_linear_page(hdr->b_l1hdr.b_pabd)) ||
 	    arc_hdr_get_compress(hdr) != ZIO_COMPRESS_OFF ||
-	    hdr->b_l1hdr.b_byteswap != DMU_BSWAP_NUMFUNCS ||
-	    off + len > HDR_GET_LSIZE(hdr)) {
+	    hdr->b_l1hdr.b_byteswap != DMU_BSWAP_NUMFUNCS) {
 		mutex_exit(hash_lock);
 		return (B_FALSE);
 	}
@@ -5960,20 +5960,19 @@ arc_hold_abd_range(spa_t *spa, const blkptr_t *bp, uint64_t off, uint64_t len,
 	ARCSTAT_CONDSTAT(B_TRUE, demand, prefetch, is_data, data, metadata,
 	    hits);
 
-	*viewp = abd_get_offset_size(hdr->b_l1hdr.b_pabd, off, len);
+	*abdp = hdr->b_l1hdr.b_pabd;
 	*hdrp = hdr;
 	return (B_TRUE);
 }
 
 /*
- * Drop a reference taken by arc_hold_abd_range().
+ * Drop a reference taken by arc_hold_abd().
  */
 void
-arc_rele_abd_range(abd_t *view, arc_buf_hdr_t *hdr, const void *tag)
+arc_rele_abd(arc_buf_hdr_t *hdr, const void *tag)
 {
 	kmutex_t *hash_lock = HDR_LOCK(hdr);
 
-	abd_free(view);
 	mutex_enter(hash_lock);
 	(void) remove_reference(hdr, tag);
 	mutex_exit(hash_lock);
