@@ -10216,11 +10216,10 @@ l2arc_write_buffers(spa_t *spa, l2arc_dev_t *dev, uint64_t target_sz)
 }
 
 static boolean_t
-l2arc_hdr_size_exceeded(void)
+l2arc_hdr_size_exceeded(uint64_t target)
 {
 	int64_t s = aggsum_upper_bound(&arc_sums.arcstat_l2_hdr_size);
-	uint64_t limit = (arc_warm ? arc_c : arc_c_max) *
-	    l2arc_meta_percent / 100;
+	uint64_t limit = target * l2arc_meta_percent / 100;
 
 	return (s > 0 && (uint64_t)s > limit);
 }
@@ -10228,11 +10227,15 @@ l2arc_hdr_size_exceeded(void)
 static boolean_t
 l2arc_hdr_limit_reached(void)
 {
-	return (arc_reclaim_needed() || l2arc_hdr_size_exceeded());
+	return (arc_reclaim_needed() ||
+	    l2arc_hdr_size_exceeded(arc_warm ? arc_c : arc_c_max));
 }
 
 /*
- * Prune the oldest L2ARC-only headers while they exceed the limit.
+ * Prune the oldest L2ARC-only headers while they exceed the limit taken
+ * from arc_c_max.  Writes stop at the limit taken from arc_c, but arc_c
+ * falls with every bout of memory pressure, and pruning to it would throw
+ * away a rebuilt L2ARC the first time the ARC shrinks after import.
  * l2arc_evict() is not used because it clears a device range ahead of the
  * write hand.  That would also drop the L2ARC copies of headers that still
  * have an L1 part, which frees no memory, and would move the hand without
@@ -10247,7 +10250,7 @@ l2arc_hdr_prune(l2arc_dev_t *dev)
 	uint64_t budget = l2arc_hdr_prune_budget;
 	uint_t batch = MAX(l2arc_hdr_prune_batch_limit, 1);
 
-	while (budget != 0 && l2arc_hdr_size_exceeded()) {
+	while (budget != 0 && l2arc_hdr_size_exceeded(arc_c_max)) {
 		boolean_t done;
 
 		mutex_enter(&dev->l2ad_mtx);
