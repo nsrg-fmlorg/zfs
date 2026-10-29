@@ -5,8 +5,14 @@
 # direct=always + dedup=on, fio seqwrite 1M, with the ARC frozen at 50M
 # eight seconds in.  Each case here runs under a deadline; on overrun the
 # kernel and pool state is captured and the script stops, since a pool
-# stuck in D state cannot be destroyed for the next case.  Cases that
-# isolate one factor run first, the one that hung last.
+# stuck in D state cannot be destroyed for the next case.
+#
+# Run 40912641885 showed the hang needs dedup, not Direct I/O: with
+# primarycache=metadata it stopped too, the pool SUSPENDED after a MOS
+# write failed with ENOSPC while the leaf vdev reported no errors.  Pool
+# space and the dedup log are now sampled to see how the pool fills.
+# The zvol case, which an earlier branch saw stall under memory pressure
+# on the unchanged path, runs first so the dedup hang cannot hide it.
 # Output goes under $OUT, owned by the runner, so redirects of sudo'ed
 # commands are meant to be done as the runner.
 # shellcheck disable=SC2024
@@ -21,13 +27,8 @@ RUNTIME=15
 LIMIT=$((RUNTIME + 120))
 # name|pool properties|fio options|vdev size|target (file or zvol)
 CASES="
-plain_always|-O direct=always -O compression=off|--rw=write --bs=1M|6G|file
-dedup_metadata|-O primarycache=metadata -O dedup=on -O compression=off|--rw=write --bs=1M|6G|file
-dedup_standard|-O dedup=on -O compression=off|--rw=write --bs=1M|6G|file
-dedup_standard_odirect|-O dedup=on -O compression=off|--rw=write --bs=1M --direct=1|6G|file
 zvol_standard_pressure|-O compression=off|--rw=randwrite --bs=128k --direct=1|10G|zvol
-dedup_always_rand|-O direct=always -O dedup=on -O compression=off|--rw=randwrite --bs=128k|6G|file
-dedup_always_seq|-O direct=always -O dedup=on -O compression=off|--rw=write --bs=1M|6G|file
+dedup_metadata|-O primarycache=metadata -O dedup=on -O compression=off|--rw=write --bs=1M|6G|file
 "
 mkdir -p "$OUT"
 
@@ -80,6 +81,20 @@ deadline() {
 	wait "$pid"
 }
 
+# spacewatch <case>: pool space and dedup log size twice a second, so a
+# pool that fills shows how fast and whether frees keep up.
+spacewatch() {
+	while :; do
+		printf '%s\t%s\t%s\n' "$(date +%s.%N | cut -c1-14)" \
+		    "$(sudo ./zpool list -Hp -o alloc,free bench 2>/dev/null |
+		    tr '\t' ' ')" \
+		    "$(sudo sh -c 'cat /proc/spl/kstat/zfs/bench/ddt_stats_* \
+		    2>/dev/null' | awk '$1 ~ /^dds_log_(active|flushing)_entries$/ ||
+		    $1 == "dds_log_flush_rate" { printf "%s=%s ", $1, $3 }')"
+		sleep 0.5
+	done >> "$OUT/$1.space.tsv"
+}
+
 dio_counts() {	# iostats is readable by root only
 	sudo cat /proc/spl/kstat/zfs/bench/iostats 2>/dev/null | awk '
 	    $1 == "direct_read_count" { r = $3 }
@@ -107,14 +122,18 @@ run_case() {	# run_case <name> <props> <fio opts> <vdev size> <target>
 		where="--directory=/bench --filename=data --size=$SIZE"
 	fi
 	before=$(dio_counts)
+	spacewatch "$name" &
+	swpid=$!
 	# shellcheck disable=SC2086
 	if ! deadline $LIMIT sudo fio --name="$name" $where \
 	    --numjobs=1 --iodepth=1 --time_based --runtime=$RUNTIME \
 	    --buffer_compress_percentage=50 --refill_buffers \
 	    --output-format=json --output="$OUT/$name.json" $opts; then
+		kill "$swpid" 2>/dev/null || true
 		capture "$name"
 		return 1
 	fi
+	kill "$swpid" 2>/dev/null || true
 	after=$(dio_counts)
 	bw=$(jq '((.jobs[0].read.bw_bytes + .jobs[0].write.bw_bytes)
 	    / 1048576) | floor' "$OUT/$name.json")
