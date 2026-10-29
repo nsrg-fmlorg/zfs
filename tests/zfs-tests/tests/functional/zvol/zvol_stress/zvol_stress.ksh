@@ -52,6 +52,9 @@ typeset tmpdir="$(mktemp -d "$TEST_BASE_DIR/zvol_stress_fio_state.XXXXXX")"
 
 log_must save_tunable VOL_USE_BLK_MQ
 log_must save_tunable VOL_REQUEST_SYNC
+if tunable_exists VOL_REQUEST_SYNC_IDLE ; then
+	log_must save_tunable VOL_REQUEST_SYNC_IDLE
+fi
 
 function create_zvols
 {
@@ -119,6 +122,9 @@ function cleanup
 	destroy_zvols
 	log_must restore_tunable VOL_USE_BLK_MQ
 	log_must restore_tunable VOL_REQUEST_SYNC
+	if tunable_exists VOL_REQUEST_SYNC_IDLE ; then
+		log_must restore_tunable VOL_REQUEST_SYNC_IDLE
+	fi
 
 	# Remove all fio's leftover state files
 	if [ -n "$tmpdir" ] ; then
@@ -147,6 +153,18 @@ set_zvol_sync 0
 create_zvols
 do_zvol_stress
 destroy_zvols
+
+# Synchronous only while a zvol is idle: with ten requests in flight
+# per zvol, some run in the submitting thread and the rest in the taskq
+set_zvol_sync_idle 1
+create_zvols
+do_zvol_stress
+# and at queue depth 1, where every request should find its zvol idle
+log_must fio --ioengine=psync --name=zvol_qd1 --direct=1 --iodepth=1 \
+	--readwrite=randwrite --bs=4k --size=64M --verify=sha1 \
+	--filename=$ZVOL_DEVDIR/$TESTPOOL/testvol1
+destroy_zvols
+set_zvol_sync_idle 0
 
 # Same for enabled zvol sync mode
 set_zvol_sync 1

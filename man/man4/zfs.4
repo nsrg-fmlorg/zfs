@@ -2998,6 +2998,39 @@ This parameter applies regardless of the
 .Sy zvol_use_blk_mq
 setting.
 .
+.It Sy zvol_request_sync_idle Ns = Ns Sy 0 Ns | Ns 1 Pq uint
+When set, a zvol I/O request that arrives while no other request is in
+flight on the same zvol is handled synchronously, as with
+.Sy zvol_request_sync ,
+and the rest are handled by the thread pool as usual.
+At a queue depth of 1, as a virtual machine guest often issues, this saves
+the hand-off to the thread pool.
+A request handled this way blocks its submitter until it completes, so
+a thread that would send more, such as one using Linux AIO, cannot.
+To find such a submitter, one in every
+.Sy zvol_request_sync_idle_probe
+idle requests goes to the thread pool; once requests overlap, they all do
+until
+.Sy zvol_request_sync_idle_delay
+requests in a row find the zvol idle.
+Has no effect when
+.Sy zvol_request_sync
+is set.
+This only applies on Linux.
+.
+.It Sy zvol_request_sync_idle_delay Ns = Ns Sy 64 Pq uint
+With
+.Sy zvol_request_sync_idle
+set, the number of requests in a row that must find their zvol idle,
+after requests overlapped, before idle requests are handled synchronously
+again.
+.
+.It Sy zvol_request_sync_idle_probe Ns = Ns Sy 64 Pq uint
+With
+.Sy zvol_request_sync_idle
+set, every this many idle requests one goes to the thread pool, so that a
+submitter with more to send can overlap it.
+.
 .It Sy zvol_num_taskqs Ns = Ns Sy 0 Pq uint
 Number of zvol taskqs.
 If
