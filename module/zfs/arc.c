@@ -6951,7 +6951,7 @@ arc_write_ready(zio_t *zio)
 		arc_hdr_alloc_abd(hdr, ARC_HDR_ALLOC_RDATA |
 		    ARC_HDR_USE_RESERVE);
 		abd_copy(hdr->b_crypt_hdr.b_rabd, zio->io_abd, psize);
-	} else if (!(HDR_UNCACHED(hdr) ||
+	} else if (BP_IS_ENCRYPTED(bp) || !(HDR_UNCACHED(hdr) ||
 	    abd_size_alloc_linear(arc_buf_size(buf)) ||
 	    !abd_is_linear(buf->b_abd) || abd_is_linear_page(buf->b_abd)) ||
 	    !arc_can_share(hdr, buf)) {
@@ -6959,6 +6959,11 @@ arc_write_ready(zio_t *zio)
 		 * Ideally, we would always copy the io_abd into b_pabd, but the
 		 * user may have disabled compressed ARC, thus we must check the
 		 * hdr's compression setting rather than the io_bp's.
+		 *
+		 * An encrypted block is never shared: the hdr has to hold the
+		 * ciphertext in b_rabd.  Sharing the plaintext buf would leave
+		 * the hdr without it, and a later read would be served as
+		 * plaintext from the ARC without ever being decrypted.
 		 */
 		if (BP_IS_ENCRYPTED(bp)) {
 			ASSERT3U(psize, >, 0);
