@@ -22,7 +22,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - run: .github/nsrg/deps.sh && sudo apt-get install -y strace
+      - run: .github/nsrg/deps.sh && sudo apt-get install -y bpftrace
       - run: .github/nsrg/build.sh . debug
       - if: matrix.module == 'loaded'
         run: .github/nsrg/load.sh .
