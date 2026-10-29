@@ -51,12 +51,42 @@ echo "first boot done"
 truncate -s 24G "$WORK"/pool.img "$WORK"/plain.img
 POOLDEV=$(sudo losetup --direct-io=on -f --show "$WORK"/pool.img)
 PLAINDEV=$(sudo losetup --direct-io=on -f --show "$WORK"/plain.img)
+# A first run set zfs_arc_max=256M at run time and still saw 1 GiB of ARC
+# data.  Record what the module did with the value, set at run time and
+# then at load time, before relying on either.
+ARC_MAX=$((256 * 1024 * 1024))
+arc_limits() {	# arc_limits <label>
+	{
+		echo "== $1"
+		echo "zfs_arc_max parameter: $(cat /sys/module/zfs/parameters/zfs_arc_max)"
+		awk '$1 ~ /^(c|c_min|c_max|size)$/ { print $1, $3 }' \
+		    /proc/spl/kstat/zfs/arcstats
+	} >> "$OUT"/arc-limits.txt
+}
+free -b > "$OUT"/arc-limits.txt
+arc_limits "module loaded with defaults"
+echo "$ARC_MAX" | sudo tee /sys/module/zfs/parameters/zfs_arc_max >/dev/null
+arc_limits "after writing $ARC_MAX at run time"
+{ sudo dmesg | grep -i "ignoring tunable" || echo "(no ignoring-tunable message)"; } \
+    >> "$OUT"/arc-limits.txt
+sudo ./scripts/zfs.sh -u
+echo "options zfs zfs_arc_max=$ARC_MAX" | sudo tee /etc/modprobe.d/zfs-arc.conf
+"$HERE"/../load.sh .
+arc_limits "after loading with zfs_arc_max=$ARC_MAX in modprobe.d"
+# scripts/zfs.sh hands modprobe the path of the in-tree zfs.ko, so the
+# modprobe.d line may not reach the module; the values above show
+# whether it did.  arc_tuning_update() takes zfs_arc_min first and only
+# accepts a maximum above arc_c_min, so lower the minimum, then set the
+# maximum.
+echo $((ARC_MAX / 2)) | sudo tee /sys/module/zfs/parameters/zfs_arc_min >/dev/null
+echo "$ARC_MAX" | sudo tee /sys/module/zfs/parameters/zfs_arc_max >/dev/null
+arc_limits "after writing zfs_arc_min=$((ARC_MAX / 2)) then zfs_arc_max=$ARC_MAX at run time"
+cat "$OUT"/arc-limits.txt
+
 sudo "$ZPOOL" create -f -o ashift=12 -O atime=off tank "$POOLDEV"
-echo $((256 * 1024 * 1024)) |
-    sudo tee /sys/module/zfs/parameters/zfs_arc_max >/dev/null
 
 arc() {	# arc <file>: snapshot of the arcstats fields we report
-	awk '$1 ~ /^(size|data_size|metadata_size|dbuf_size|hits|misses)$/ \
+	awk '$1 ~ /^(c|c_max|size|data_size|metadata_size|dbuf_size|hits|misses)$/ \
 	    { print $1, $3 }' /proc/spl/kstat/zfs/arcstats > "$1"
 }
 
@@ -106,6 +136,7 @@ boot() {	# boot <name> <device> <iothread> <aio> <pct>
 	fi
 }
 
+first=1
 grep -v '^#' "$HERE"/configs | while read -r name be bs iot aio direct comp pct; do
 	[ -n "$name" ] || continue
 	echo "== $name"
@@ -115,7 +146,7 @@ grep -v '^#' "$HERE"/configs | while read -r name be bs iot aio direct comp pct;
 		;;
 	zvol)
 		sudo "$ZFS" create -V 2G -o volblocksize="$bs" \
-		    -o compression="$comp" tank/vol
+		    -o compression="$comp" -o direct="$direct" tank/vol
 		sudo udevadm settle
 		dev=/dev/zvol/tank/vol
 		;;
@@ -128,12 +159,13 @@ grep -v '^#' "$HERE"/configs | while read -r name be bs iot aio direct comp pct;
 	esac
 	# A failure on the first configuration is the rig, not the backing;
 	# stop rather than spend the job on timeouts.
-	if ! boot "$name" "$dev" "$iot" "$aio" "$pct" && [ "$name" = aa1-zvol-16k ]; then
+	if ! boot "$name" "$dev" "$iot" "$aio" "$pct" && [ "$first" = 1 ]; then
 		echo "first configuration failed; stopping"
 		exit 1
 	fi
+	first=0
 	# Output is ours; only the zfs command needs root.
-	{ sudo "$ZFS" get -H -o name,property,value compression,compressratio \
+	{ sudo "$ZFS" get -H -o name,property,value compression,compressratio,direct \
 	    tank/vol tank/fs 2>/dev/null || true; } > "$OUT/$name/zfs.props"
 	sudo "$ZFS" destroy tank/vol 2>/dev/null || true
 	sudo "$ZFS" destroy tank/fs 2>/dev/null || true

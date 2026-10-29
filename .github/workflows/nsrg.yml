@@ -14,7 +14,7 @@ name: nsrg
 
 on:
   push:
-    branches: ['wip/**', 'nsrg/**', '!wip/kvm-bench']
+    branches: ['wip/**', 'nsrg/**', '!wip/kvm-bench', '!wip/kvm-bench-dio']
   workflow_dispatch:
     inputs:
       tags:

@@ -6,7 +6,7 @@ name: kvm
 
 on:
   push:
-    branches: ['wip/kvm-bench']
+    branches: ['wip/kvm-bench', 'wip/kvm-bench-dio']
   workflow_dispatch:
 
 concurrency:

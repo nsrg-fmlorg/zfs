@@ -37,6 +37,32 @@ for d in "$OUT"/*/; do
 	done
 done
 echo
+echo '## fsync latency (fio sync lat, qd1-fsyncwrite)'
+echo
+echo '| config | fsync mean us (min-max) | p99 us | p99.9 us | write clat + fsync mean us |'
+echo '|---|---|---|---|---|'
+for d in "$OUT"/*/; do
+	name=$(basename "$d")
+	ls "$d"/qd1-fsyncwrite.*.json >/dev/null 2>&1 || continue
+	for j in "$d"/qd1-fsyncwrite.*.json; do
+		jq -r '.jobs[0] | [(.sync.lat_ns.mean // 0) / 1000,
+		    (.sync.lat_ns.percentile["99.000000"] // 0) / 1000,
+		    (.sync.lat_ns.percentile["99.900000"] // 0) / 1000,
+		    .write.clat_ns.mean / 1000] | @tsv' "$j"
+	done | awk -F'\t' -v n="$name" '
+	    { m += $1; p += $2; q += $3; w += $4; c++
+	      if (c == 1 || $1 < lo) lo = $1
+	      if (c == 1 || $1 > hi) hi = $1 }
+	    END { printf "| %s | %.1f (%.1f-%.1f) | %.1f | %.1f | %.1f |\n",
+	      n, m / c, lo, hi, p / c, q / c, (m + w) / c }'
+done
+echo
+echo '## ARC limits'
+echo
+echo '```'
+cat "$OUT"/arc-limits.txt 2>/dev/null || echo "no arc-limits.txt"
+echo '```'
+echo
 echo '## block cloning'
 echo
 echo '```'

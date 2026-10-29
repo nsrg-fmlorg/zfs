@@ -1,29 +1,18 @@
 # name		backend	bs	iothread aio		direct		comp	pct
-aa1-zvol-16k	zvol	16k	0	threads		-		off	0
-aa2-zvol-16k	zvol	16k	0	threads		-		off	0
-loop-threads	loop	-	0	threads		-		-	0
-loop-uring	loop	-	0	io_uring	-		-	0
-zvol-16k-t	zvol	16k	0	threads		-		off	0
-zvol-16k-u	zvol	16k	0	io_uring	-		off	0
-zvol-16k-n	zvol	16k	0	native		-		off	0
-zvol-16k-io-t	zvol	16k	1	threads		-		off	0
-zvol-16k-io-u	zvol	16k	1	io_uring	-		off	0
-zvol-4k-t	zvol	4k	0	threads		-		off	0
-zvol-4k-u	zvol	4k	0	io_uring	-		off	0
-zvol-4k-io-t	zvol	4k	1	threads		-		off	0
-zvol-4k-io-u	zvol	4k	1	io_uring	-		off	0
-file-16k-t	file	16k	0	threads		standard	off	0
-file-16k-u	file	16k	0	io_uring	standard	off	0
-file-16k-io-t	file	16k	1	threads		standard	off	0
-file-16k-io-u	file	16k	1	io_uring	standard	off	0
-file-4k-t	file	4k	0	threads		standard	off	0
-file-4k-u	file	4k	0	io_uring	standard	off	0
-file-4k-io-t	file	4k	1	threads		standard	off	0
-file-4k-io-u	file	4k	1	io_uring	standard	off	0
-file-16k-always-t file	16k	0	threads		always		off	0
-zvol-off-50	zvol	16k	0	threads		-		off	50
-zvol-lz4-0	zvol	16k	0	threads		-		lz4	0
-zvol-lz4-50	zvol	16k	0	threads		-		lz4	50
-file-off-50	file	16k	0	threads		standard	off	50
-file-lz4-0	file	16k	0	threads		standard	lz4	0
-file-lz4-50	file	16k	0	threads		standard	lz4	50
+#
+# For a zvol, direct is the volume's direct property; for a file, the
+# dataset's.  QEMU opens every disk with cache=none.
+aa1-z16-std-n	zvol	16k	0	native		standard	off	0
+aa2-z16-std-n	zvol	16k	0	native		standard	off	0
+loop-n		loop	-	0	native		-		-	0
+loop-u		loop	-	0	io_uring	-		-	0
+file4k-n	file	4k	0	native		standard	off	0
+file4k-u	file	4k	0	io_uring	standard	off	0
+z16-std-n	zvol	16k	0	native		standard	off	0
+z16-std-u	zvol	16k	0	io_uring	standard	off	0
+z16-alw-n	zvol	16k	0	native		always		off	0
+z16-alw-u	zvol	16k	0	io_uring	always		off	0
+z4-std-n	zvol	4k	0	native		standard	off	0
+z4-std-u	zvol	4k	0	io_uring	standard	off	0
+z4-alw-n	zvol	4k	0	native		always		off	0
+z4-alw-u	zvol	4k	0	io_uring	always		off	0
