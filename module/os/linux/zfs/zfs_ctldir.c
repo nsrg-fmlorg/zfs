@@ -524,7 +524,7 @@ zfsctl_snapshot_phys(zfsvfs_t *zfsvfs, uint64_t objsetid,
 		if (doi.doi_bonus_type != DMU_OT_DSL_DATASET) {
 			error = SET_ERROR(ENOENT);
 		} else {
-			phys = dbuf->db_data;
+			phys = abd_to_buf(dbuf->db_abd);
 			if (creationp != NULL)
 				*creationp = phys->ds_creation_time;
 			if (fsidp != NULL) {
