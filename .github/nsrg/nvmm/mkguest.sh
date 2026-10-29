@@ -56,7 +56,7 @@ fio --name=warm --filename=/dev/vda --rw=read --bs=1M --direct=1 \
 echo FIO-BEGIN
 fio --name=qd1 --filename=/dev/vda --rw=randread --bs=4k --direct=1 \
     --ioengine=psync --iodepth=1 --size=1G --time_based --runtime=20 \
-    --output-format=json
+    --percentile_list=50:99:99.9
 echo FIO-END
 poweroff -f
 INIT

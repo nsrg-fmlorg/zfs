@@ -31,5 +31,5 @@ timeout 180 qemu-system-x86_64 -accel nvmm -smp 1 -m 512 \
 echo "qemu exit: $? after $(( $(date +%s) - start ))s"
 kill -INT "$dpid" 2>/dev/null; wait "$dpid" 2>/dev/null
 cat "$g/nvmm.dtrace" 2>/dev/null || echo "no dtrace output"
-tail -n 40 "$g/nvmm.serial" 2>/dev/null || true
+.github/nsrg/nvmm/summary.sh "$g/nvmm.serial"
 rm -f "$g/disk.img"

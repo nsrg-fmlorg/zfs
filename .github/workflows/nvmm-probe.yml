@@ -23,7 +23,7 @@ jobs:
       fail-fast: false
       matrix:
         release: ['10.1', '11.0']
-        try: [1, 2]
+        try: [1, 2, 3]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -63,8 +63,10 @@ jobs:
             modload nvmm
             nvmmctl identify
             v=$(uname -r)
-            ftp -o /var/tmp/xbase.tar.xz \
-              "https://cdn.NetBSD.org/pub/NetBSD/NetBSD-$v/amd64/binary/sets/xbase.tar.xz"
+            u="https://cdn.NetBSD.org/pub/NetBSD/NetBSD-$v/amd64/binary/sets"
+            # 11.0 ships .tar.xz sets, 10.x .tgz.
+            ftp -o /var/tmp/xbase.tar.xz "$u/xbase.tar.xz" ||
+              ftp -o /var/tmp/xbase.tar.xz "$u/xbase.tgz"
             tar -xpf /var/tmp/xbase.tar.xz -C /
             /usr/sbin/pkg_add qemu
           run: .github/nsrg/nvmm/run-nvmm.sh guest
