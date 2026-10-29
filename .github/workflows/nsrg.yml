@@ -175,3 +175,12 @@ jobs:
       - run: .github/workflows/scripts/qemu-2-start.sh freebsd15-1r
       - run: .github/workflows/scripts/qemu-3-deps.sh --poweroff freebsd15-1r
       - run: .github/workflows/scripts/qemu-4-build.sh --enable-debug freebsd15-1r
+
+  oldkernel:
+    # Linux-Minimum in META is 4.18; build against 5.4 headers so the
+    # pre-5.11 kmap branches this branch touches are compiled at all.
+    if: github.ref == 'refs/heads/wip/pr18854'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: .github/nsrg/oldkernel.sh
