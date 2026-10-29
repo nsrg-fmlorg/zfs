@@ -1,6 +1,7 @@
 /aio_dio_readv
 /aio_barrier_race
 /aio_dio_writev
+/aio_dio_bounce
 /dio_write_short
 /badsend
 /btree_test

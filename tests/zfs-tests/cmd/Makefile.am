@@ -92,6 +92,10 @@ scripts_zfs_tests_bin_PROGRAMS += %D%/aio_dio_writev
 %C%_aio_dio_writev_CFLAGS = $(AM_CFLAGS) $(LIBAIO_CFLAGS)
 %C%_aio_dio_writev_LDADD  = $(LIBAIO_LIBS)
 
+scripts_zfs_tests_bin_PROGRAMS += %D%/aio_dio_bounce
+%C%_aio_dio_bounce_CFLAGS = $(AM_CFLAGS) $(LIBAIO_CFLAGS)
+%C%_aio_dio_bounce_LDADD  = $(LIBAIO_LIBS)
+
 scripts_zfs_tests_bin_PROGRAMS += %D%/dio_write_short
 %C%_dio_write_short_CFLAGS = $(AM_CFLAGS) $(LIBAIO_CFLAGS)
 %C%_dio_write_short_LDADD  = $(LIBAIO_LIBS)
