@@ -1,0 +1,26 @@
+name: nsrg-async
+
+# zfs_async_dio_enabled A/B for wip/pr18902 only; see .github/nsrg/async.sh.
+
+on:
+  push:
+    branches: ['wip/pr18902']
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  async:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - run: .github/nsrg/deps.sh
+      - run: .github/nsrg/async.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: async
+          path: /var/tmp/async
