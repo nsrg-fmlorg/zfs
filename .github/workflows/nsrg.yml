@@ -125,6 +125,8 @@ jobs:
 
   bench:
     runs-on: ubuntu-24.04
+    # A hung fio otherwise holds the runner for the 6 hour default.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
         with:
@@ -143,6 +145,7 @@ jobs:
           if-no-files-found: ignore
 
   measure:
+    timeout-minutes: 120
     # Steps, not the job, are gated: hashFiles() is not available in a
     # job-level if.  Without a measure.d script the job costs a checkout.
     runs-on: ubuntu-24.04
