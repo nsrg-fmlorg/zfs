@@ -1663,7 +1663,7 @@ dmu_read_uio_arc(dnode_t *dn, zfs_uio_t *uio, uint64_t size,
 		}
 	}
 
-	*residp = size - (zfs_uio_offset(uio) - start);
+	*residp = size - ((uint64_t)zfs_uio_offset(uio) - start);
 
 	/*
 	 * Keep the prefetcher's stream alive, but only when we served the whole
