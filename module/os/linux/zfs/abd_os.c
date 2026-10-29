@@ -955,11 +955,19 @@ abd_iter_unmap_impl(struct abd_iter *aiter, boolean_t nonatomic)
 		if (zfs_kmap_partial())
 			offset &= PAGE_SIZE - 1;
 
-		/* LINTED E_FUNC_SET_NOT_USED */
 #ifndef HAVE_KMAP_LOCAL_PAGE
-		if (nonatomic)
-			paddr = zfs_kunmap(page);
-		else
+		if (nonatomic) {
+			/*
+			 * kunmap() takes the page, not the address: the same
+			 * page abd_iter_map_impl() mapped, which is not the
+			 * first page of the segment when the map is partial.
+			 */
+			struct page *page = sg_page(aiter->iter_sg);
+			if (zfs_kmap_partial())
+				page = nth_page(page,
+				    aiter->iter_offset / PAGE_SIZE);
+			zfs_kunmap(page);
+		} else
 #endif
 			zfs_kunmap_local(aiter->iter_mapaddr - offset);
 	}
