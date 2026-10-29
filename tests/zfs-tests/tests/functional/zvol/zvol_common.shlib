@@ -138,3 +138,14 @@ function set_zvol_sync
 {
 	log_must set_tunable32 VOL_REQUEST_SYNC $1
 }
+
+# enable/disable synchronous handling of requests that find the zvol idle
+#
+# $1: 1 = enable, 0 = disable
+function set_zvol_sync_idle
+{
+	# Only Linux has it
+	if tunable_exists VOL_REQUEST_SYNC_IDLE ; then
+		log_must set_tunable32 VOL_REQUEST_SYNC_IDLE $1
+	fi
+}

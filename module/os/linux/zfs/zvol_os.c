@@ -88,6 +88,25 @@ zvol_end_io(struct bio *bio, struct request *rq, int error)
 static unsigned int zvol_blk_mq_queue_depth = BLKDEV_DEFAULT_RQ;
 static unsigned int zvol_actual_blk_mq_queue_depth;
 
+/*
+ * Run a request in the submitting thread when nothing else is in flight
+ * on its zvol, as zvol_request_sync does for every request.  See
+ * zvol_request_idle().
+ */
+static unsigned int zvol_request_sync_idle = 0;
+
+/*
+ * A request run in the submitting thread blocks it, so a thread that
+ * would have sent more cannot, and its zvol looks idle every time.  To
+ * find such a submitter, every zvol_request_sync_idle_probe'th idle
+ * request goes to the taskq; one that arrives while it is in flight
+ * shows overlap, and requests then go to the taskq until
+ * zvol_request_sync_idle_delay arrivals in a row find the zvol idle.
+ * Compare zfs_vdev_nia_delay.
+ */
+static unsigned int zvol_request_sync_idle_probe = 64;
+static unsigned int zvol_request_sync_idle_delay = 64;
+
 struct zvol_state_os {
 	struct gendisk		*zvo_disk;	/* generic disk */
 	struct request_queue	*zvo_queue;	/* request queue */
@@ -97,7 +116,28 @@ struct zvol_state_os {
 
 	/* Set from the global 'zvol_use_blk_mq' at zvol load */
 	boolean_t use_blk_mq;
+
+	/* Requests counted by zvol_request_idle() and not yet ended */
+	uint32_t zvo_inflight;
+	/* zvol_request_idle() state; races only misjudge a request */
+	boolean_t zvo_overlap;		/* overlap seen, inline is off */
+	uint_t zvo_idle_count;		/* idle arrivals since overlap */
+	uint_t zvo_probe_count;		/* inline requests since probe */
 };
+
+/*
+ * End a request that zvol_request_impl() passed to zvol_read(),
+ * zvol_write() or zvol_discard().  The in-flight count drops before the
+ * bio completes, so that the submitter's next request, which can follow
+ * at once, finds the zvol idle.
+ */
+static inline void
+zvol_request_end(zv_request_t *zvr, int error)
+{
+	if (zvr->counted)
+		atomic_dec_32(&zvr->zv->zv_zso->zvo_inflight);
+	zvol_end_io(zvr->bio, zvr->rq, error);
+}
 
 static struct ida zvol_ida;
 
@@ -233,7 +273,7 @@ zvol_write(zv_request_t *zvr)
 		error = zil_commit(zv->zv_zilog, ZVOL_OBJ);
 		if (error != 0) {
 			rw_exit(&zv->zv_suspend_lock);
-			zvol_end_io(bio, rq, -error);
+			zvol_request_end(zvr, -error);
 			return;
 		}
 	}
@@ -241,7 +281,7 @@ zvol_write(zv_request_t *zvr)
 	/* Some requests are just for flush and nothing else. */
 	if (io_size(bio, rq) == 0) {
 		rw_exit(&zv->zv_suspend_lock);
-		zvol_end_io(bio, rq, 0);
+		zvol_request_end(zvr, 0);
 		return;
 	}
 
@@ -314,7 +354,7 @@ zvol_write(zv_request_t *zvr)
 		blk_generic_end_io_acct(q, disk, WRITE, bio, start_time);
 	}
 
-	zvol_end_io(bio, rq, error);
+	zvol_request_end(zvr, error);
 }
 
 static void
@@ -410,7 +450,7 @@ unlock:
 		    start_time);
 	}
 
-	zvol_end_io(bio, rq, error);
+	zvol_request_end(zvr, error);
 }
 
 static void
@@ -505,7 +545,7 @@ zvol_read(zv_request_t *zvr)
 		blk_generic_end_io_acct(q, disk, READ, bio, start_time);
 	}
 
-	zvol_end_io(bio, rq, error);
+	zvol_request_end(zvr, error);
 }
 
 static void
@@ -535,6 +575,41 @@ zvol_read_task(void *arg)
 
 /* Get the IO opcode */
 #define	ZVOL_OP(bio, rq) (bio != NULL ? bio_op(bio) : req_op(rq))
+
+/*
+ * With zvol_request_sync_idle set, decide whether a request finds its
+ * zvol idle and can run in the submitting thread.  At queue depth 1,
+ * which is what a VM guest often issues, the taskq hand-off and the
+ * wakeup that follows it are pure latency.  Once requests overlap,
+ * including those of one asynchronous submitter found by a probe, they
+ * go to the taskq as before.
+ */
+static boolean_t
+zvol_request_idle(zv_request_t *zvr)
+{
+	if (zvol_request_sync_idle == 0)
+		return (B_FALSE);
+
+	struct zvol_state_os *zso = zvr->zv->zv_zso;
+
+	zvr->counted = B_TRUE;
+	if (atomic_inc_32_nv(&zso->zvo_inflight) != 1) {
+		zso->zvo_overlap = B_TRUE;
+		zso->zvo_idle_count = 0;
+		return (B_FALSE);
+	}
+	if (zso->zvo_overlap) {
+		if (++zso->zvo_idle_count < zvol_request_sync_idle_delay)
+			return (B_FALSE);
+		zso->zvo_overlap = B_FALSE;
+		zso->zvo_probe_count = 0;
+	}
+	if (++zso->zvo_probe_count >= zvol_request_sync_idle_probe) {
+		zso->zvo_probe_count = 0;
+		return (B_FALSE);
+	}
+	return (B_TRUE);
+}
 
 /*
  * Process a BIO or request
@@ -653,6 +728,9 @@ zvol_request_impl(zvol_state_t *zv, struct bio *bio, struct request *rq,
 			rw_downgrade(&zv->zv_suspend_lock);
 		}
 
+		if (!force_sync && zvol_request_idle(&zvr))
+			force_sync = B_TRUE;
+
 		/*
 		 * We don't want this thread to be blocked waiting for i/o to
 		 * complete, so we instead wait from a taskq callback. The
@@ -712,6 +790,9 @@ zvol_request_impl(zvol_state_t *zv, struct bio *bio, struct request *rq,
 		}
 
 		rw_enter(&zv->zv_suspend_lock, RW_READER);
+
+		if (!force_sync && zvol_request_idle(&zvr))
+			force_sync = B_TRUE;
 
 		/* See comment in WRITE case above. */
 		if (force_sync) {
@@ -1975,6 +2056,18 @@ MODULE_PARM_DESC(zvol_blk_mq_queue_depth, "Default blk-mq queue depth");
 
 module_param(zvol_use_blk_mq, uint, 0644);
 MODULE_PARM_DESC(zvol_use_blk_mq, "Use the blk-mq API for zvols");
+
+module_param(zvol_request_sync_idle, uint, 0644);
+MODULE_PARM_DESC(zvol_request_sync_idle,
+	"Handle a request synchronously when its zvol has none in flight");
+
+module_param(zvol_request_sync_idle_probe, uint, 0644);
+MODULE_PARM_DESC(zvol_request_sync_idle_probe,
+	"Send every Nth idle request to the taskq to look for overlap");
+
+module_param(zvol_request_sync_idle_delay, uint, 0644);
+MODULE_PARM_DESC(zvol_request_sync_idle_delay,
+	"Idle requests after overlap before handling them synchronously");
 
 module_param(zvol_blk_mq_blocks_per_thread, uint, 0644);
 MODULE_PARM_DESC(zvol_blk_mq_blocks_per_thread,
