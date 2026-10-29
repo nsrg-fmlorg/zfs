@@ -553,6 +553,15 @@ zpl_async_dio_task(void *arg)
 	    (aio->uio.uio_extflg & UIO_DIO_CKSUM_RETRIED))
 		zpl_dio_read_decline(aio->kiocb->ki_filp);
 
+	/*
+	 * A Direct I/O write failed its checksum verify and was redone from
+	 * a private copy; copy every later Direct I/O write on this handle,
+	 * matching zpl_iter_write().
+	 */
+	if (aio->rw == UIO_WRITE &&
+	    (aio->uio.uio_extflg & UIO_DIO_CKSUM_RETRIED))
+		zpl_dio_write_bounce(aio->kiocb->ki_filp);
+
 	if (ret < 0) {
 		done = ret;
 	} else {
@@ -803,6 +812,17 @@ zpl_async_dio_queue(struct kiocb *kiocb, struct iov_iter *iter,
 		zpl_file_data_t *zfd = atomic_load_ptr(&filp->private_data);
 		if (zfd != NULL && zfd->zfd_dio_read_declined)
 			aio->uio.uio_extflg |= UIO_DIO_DENY;
+	}
+
+	/*
+	 * A Direct I/O write on this handle already failed its checksum
+	 * verify; keep writing from a private copy, matching
+	 * zpl_iter_write().
+	 */
+	if (rw == UIO_WRITE) {
+		zpl_file_data_t *zfd = atomic_load_ptr(&filp->private_data);
+		if (zfd != NULL && atomic_load_32(&zfd->zfd_dio_write_bounce))
+			aio->uio.uio_extflg |= UIO_DIO_BOUNCE;
 	}
 
 	/*
