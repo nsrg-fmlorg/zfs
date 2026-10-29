@@ -1454,15 +1454,15 @@ dbuf_handle_indirect_hole(void *data, dnode_t *dn, blkptr_t *dbbp)
 }
 
 /*
- * Handle reads on dbufs that are holes, if necessary.  This function
- * requires that the dbuf's mutex is held. Returns success (0) if action
- * was taken, ENOENT if no action was taken.
+ * Whether db reads as a hole.  This function requires that the dbuf's
+ * mutex is held.  It is shared by dbuf_read_hole() and the ARC range read
+ * in dbuf_hold_arc_range(), which must agree: until a txg syncs, a free is
+ * known only to the dnode and bp still names the old block.
  */
-static int
-dbuf_read_hole(dmu_buf_impl_t *db, dnode_t *dn, blkptr_t *bp)
+static boolean_t
+dbuf_is_hole(dmu_buf_impl_t *db, dnode_t *dn, const blkptr_t *bp)
 {
 	ASSERT(MUTEX_HELD(&db->db_mtx));
-	arc_buf_t *db_data;
 
 	int is_hole = bp == NULL || BP_IS_HOLE(bp);
 	/*
@@ -1494,7 +1494,21 @@ dbuf_read_hole(dmu_buf_impl_t *db, dnode_t *dn, blkptr_t *bp)
 		}
 	}
 
-	if (is_hole) {
+	return (is_hole);
+}
+
+/*
+ * Handle reads on dbufs that are holes, if necessary.  This function
+ * requires that the dbuf's mutex is held. Returns success (0) if action
+ * was taken, ENOENT if no action was taken.
+ */
+static int
+dbuf_read_hole(dmu_buf_impl_t *db, dnode_t *dn, blkptr_t *bp)
+{
+	ASSERT(MUTEX_HELD(&db->db_mtx));
+	arc_buf_t *db_data;
+
+	if (dbuf_is_hole(db, dn, bp)) {
 		db_data = dbuf_alloc_arcbuf(db);
 		memset(db_data->b_data, 0, db->db.db_size);
 
@@ -1777,18 +1791,24 @@ dbuf_hold_arc_range(dmu_buf_impl_t *db, uint64_t off, uint64_t len,
 	if (db->db_level != 0 || db->db_blkid == DMU_BONUS_BLKID)
 		return (B_FALSE);
 
+	/* Lock in the order dbuf_read() does. */
+	DB_DNODE_ENTER(db);
 	mutex_enter(&db->db_mtx);
 	if (db->db_state != DB_UNCACHED || db->db_dirtycnt != 0) {
 		mutex_exit(&db->db_mtx);
+		DB_DNODE_EXIT(db);
 		return (B_FALSE);
 	}
+	/* Decide holes as dbuf_read() does; see dbuf_is_hole(). */
 	dblt = dmu_buf_lock_parent(db, RW_READER, FTAG);
-	if (dmu_buf_get_bp_from_dbuf(db, &bp) == 0 && bp != NULL) {
+	if (dmu_buf_get_bp_from_dbuf(db, &bp) == 0 &&
+	    !dbuf_is_hole(db, DB_DNODE(db), bp)) {
 		bp_copy = *bp;
 		have_bp = B_TRUE;
 	}
 	dmu_buf_unlock_parent(db, dblt, FTAG);
 	mutex_exit(&db->db_mtx);
+	DB_DNODE_EXIT(db);
 
 	if (!have_bp)
 		return (B_FALSE);
