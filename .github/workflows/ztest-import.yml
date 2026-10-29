@@ -1,7 +1,7 @@
 name: ztest-import
 
-# Experiment for wip/ztest-import only: does ztest_import_impl() fail
-# exactly when /dev/zfs is absent, and is it independent of ASan?
+# Experiment for wip/ztest-import only: run the sanitize job's ztest
+# with and without a loaded module, counting passes that import.
 
 on:
   push:
@@ -13,29 +13,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  import:
+  count:
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [loaded, absent]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - run: .github/nsrg/deps.sh
-      # Debug build of the whole tree: userspace and the kernel module.
+      - run: .github/nsrg/deps.sh && sudo apt-get install -y strace
       - run: .github/nsrg/build.sh . debug
-      - name: debug, no /dev/zfs
-        run: sudo .github/nsrg/ztest-import.sh debug-nodev
-      - run: .github/nsrg/load.sh .
-      - name: debug, /dev/zfs present
-        run: sudo .github/nsrg/ztest-import.sh debug-dev
-      # Userspace again under the sanitizers, as the sanitize job builds
-      # it; the module loaded above stays loaded across the clean.
+      - if: matrix.module == 'loaded'
+        run: .github/nsrg/load.sh .
       - run: git clean -fdxq && .github/nsrg/build.sh . sanitize
-      - name: sanitize, /dev/zfs present
-        run: sudo .github/nsrg/ztest-import.sh asan-dev
-      - run: sudo scripts/zfs.sh -u
-      - name: sanitize, no /dev/zfs
-        run: sudo .github/nsrg/ztest-import.sh asan-nodev
+      - run: sudo .github/nsrg/ztest-count.sh ${{ matrix.module }} 2
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: ztest-import
-          path: /var/tmp/zti-*/*.log
+          name: zcount-${{ matrix.module }}
+          path: /var/tmp/zcount-*
