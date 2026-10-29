@@ -91,8 +91,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: .github/nsrg/deps.sh
-      - run: .github/nsrg/build.sh . sanitize
-      - run: .github/nsrg/ztest.sh
+      # ztest asks the kernel module whether a pool is active before it
+      # imports one (pool_active() in lib/libzpool/util.c), and without
+      # a module that check fails and the import reports "no pools
+      # found".  zloop.yml loads the module for the same reason.  The
+      # sanitizers apply to userspace only, so the module comes from a
+      # debug build and stays loaded while userspace is rebuilt.
+      - run: .github/nsrg/build.sh . debug
+      - run: .github/nsrg/load.sh .
+      - run: git clean -fdxq && .github/nsrg/build.sh . sanitize
+      - run: sudo .github/nsrg/ztest.sh
 
   zts:
     runs-on: ubuntu-24.04
