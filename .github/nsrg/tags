@@ -1,1 +1,1 @@
-rsend,io,zvol_misc,mmap,bclone
+rsend,io,zvol_misc,mmap,bclone,fault
