@@ -2763,11 +2763,11 @@ dmu_buf_will_dirty_flags(dmu_buf_t *db_fake, dmu_tx_t *tx, dmu_flags_t flags)
 				undirty = B_TRUE;
 			} else {
 				/*
-				 * This dbuf is already dirty and cached.
-				 * We skip dbuf_read(), so apply the caching
-				 * hints it would have, or the final write
-				 * of a block written in parts would leave it
-				 * marked partial and keep it in the dbuf cache.
+				 * Already dirty and cached, so there is no
+				 * dbuf_read() to update the caching hints;
+				 * update them here.  Otherwise a block
+				 * written in parts keeps db_partial_read
+				 * from its first write and stays cached.
 				 */
 				dbuf_update_caching(db, flags);
 				dbuf_redirty(dr);
