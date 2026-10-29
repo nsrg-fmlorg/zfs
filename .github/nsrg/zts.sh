@@ -5,4 +5,4 @@ set -eu
 tags=${TAGS:-}
 [ -n "$tags" ] || tags=$(cat .github/nsrg/tags 2>/dev/null || echo arc,cache)
 .github/nsrg/load.sh .
-scripts/zfs-tests.sh -vK -s 3G -T "$tags"
+scripts/zfs-tests.sh -vKD -s 3G -T "$tags"
