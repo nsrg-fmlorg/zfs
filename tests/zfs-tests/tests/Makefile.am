@@ -2608,6 +2608,8 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS += \
 	functional/zvol/zvol_misc/zvol_misc_005_neg.ksh \
 	functional/zvol/zvol_misc/zvol_misc_006_pos.ksh \
 	functional/zvol/zvol_misc/zvol_misc_direct.ksh \
+	functional/zvol/zvol_misc/zvol_misc_direct_churn.ksh \
+	functional/zvol/zvol_misc/zvol_misc_direct_edge.ksh \
 	functional/zvol/zvol_misc/zvol_misc_direct_prop.ksh \
 	functional/zvol/zvol_misc/zvol_misc_fua.ksh \
 	functional/zvol/zvol_misc/zvol_misc_hierarchy.ksh \
