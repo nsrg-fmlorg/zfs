@@ -2805,7 +2805,7 @@ dmu_buf_will_dirty(dmu_buf_t *db_fake, dmu_tx_t *tx)
 }
 
 void
-dmu_buf_will_rewrite(dmu_buf_t *db_fake, dmu_tx_t *tx)
+dmu_buf_will_rewrite_flags(dmu_buf_t *db_fake, dmu_tx_t *tx, dmu_flags_t flags)
 {
 	dmu_buf_impl_t *db = (dmu_buf_impl_t *)db_fake;
 
@@ -2825,15 +2825,24 @@ dmu_buf_will_rewrite(dmu_buf_t *db_fake, dmu_tx_t *tx)
 
 	/*
 	 * The dbuf is not dirty, so we need to make it dirty and
-	 * mark it for rewrite (preserve logical birth time).
+	 * mark it for rewrite (preserve logical birth time).  The
+	 * caller's caching flags go along: without DMU_UNCACHEDIO the
+	 * dbuf_read() in there would clear db_pending_evict and keep
+	 * the block cached.
 	 */
-	dmu_buf_will_dirty_flags(db_fake, tx, DMU_READ_NO_PREFETCH);
+	dmu_buf_will_dirty_flags(db_fake, tx, flags);
 
 	mutex_enter(&db->db_mtx);
 	dbuf_dirty_record_t *dr = dbuf_find_dirty_eq(db, tx->tx_txg);
 	if (dr != NULL && db->db_level == 0)
 		dr->dt.dl.dr_rewrite = B_TRUE;
 	mutex_exit(&db->db_mtx);
+}
+
+void
+dmu_buf_will_rewrite(dmu_buf_t *db_fake, dmu_tx_t *tx)
+{
+	dmu_buf_will_rewrite_flags(db_fake, tx, DMU_READ_NO_PREFETCH);
 }
 
 boolean_t
