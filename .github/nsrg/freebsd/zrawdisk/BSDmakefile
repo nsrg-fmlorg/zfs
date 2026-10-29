@@ -1,0 +1,4 @@
+KMOD=	zrawdisk
+SRCS=	zrawdisk.c
+
+.include <bsd.kmod.mk>

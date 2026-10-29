@@ -161,3 +161,24 @@ jobs:
         with:
           name: measure
           path: /var/tmp/measure
+
+  freebsd-rawdev:
+    # FreeBSD file vdevs on device nodes without a GEOM provider.  Only
+    # the branch that changes them pays for a VM.  Upstream's own qemu
+    # scripts, because their FreeBSD image has a UFS root: this tree's
+    # module cannot replace a loaded zfs.ko under a ZFS root, which is
+    # what the vmactions images have.  qemu-4-build.sh without --poweroff
+    # leaves vm0 up with the debug build installed.
+    if: github.ref == 'refs/heads/wip/pr17168'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - run: .github/workflows/scripts/qemu-1-setup.sh
+      - run: .github/workflows/scripts/qemu-2-start.sh freebsd15-1r
+      - run: .github/workflows/scripts/qemu-3-deps.sh --poweroff freebsd15-1r
+      - run: .github/workflows/scripts/qemu-4-build.sh --enable-debug freebsd15-1r
+      - run: >
+          ssh zfs@vm0 'cd $HOME/zfs &&
+          sudo make -C .github/nsrg/freebsd/zrawdisk &&
+          sudo .github/nsrg/freebsd/test-rawdev.sh'
