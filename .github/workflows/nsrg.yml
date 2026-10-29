@@ -108,6 +108,22 @@ jobs:
           name: zts-results
           path: /var/tmp/test_results
 
+  dbufmem:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: .github/nsrg/deps.sh
+      - run: .github/nsrg/dbufmem.sh
+        env:
+          BASE: ${{ inputs.base || 'upstream/master' }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dbufmem
+          path: /var/tmp/dbufmem
+
   bench:
     runs-on: ubuntu-24.04
     steps:
