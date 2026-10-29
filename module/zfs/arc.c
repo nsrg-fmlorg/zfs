@@ -598,6 +598,7 @@ arc_stats_t arc_stats = {
 	{ "l2_evict_lock_retry",	KSTAT_DATA_UINT64 },
 	{ "l2_evict_reading",		KSTAT_DATA_UINT64 },
 	{ "l2_evict_l1cached",		KSTAT_DATA_UINT64 },
+	{ "l2_keep_hot",		KSTAT_DATA_UINT64 },
 	{ "l2_free_on_write",		KSTAT_DATA_UINT64 },
 	{ "l2_abort_lowmem",		KSTAT_DATA_UINT64 },
 	{ "l2_cksum_bad",		KSTAT_DATA_UINT64 },
@@ -983,6 +984,18 @@ static uint64_t l2arc_meta_cycles = 2;
  * 		these commands.
  */
 static uint64_t l2arc_trim_ahead = 0;
+
+/*
+ * l2arc_keep_hot_pct : The share of each eviction window, in percent,
+ * 		that may be spent keeping blocks the write hand is about to
+ * 		overwrite.  A block is kept when it exists only in the L2ARC
+ * 		and was read from it since it was last written; it is copied
+ * 		to the write hand and its hit count cleared, so it must be
+ * 		read again to survive the next lap.  0, the default, keeps
+ * 		nothing.  Values above 50 are treated as 50, so that new
+ * 		blocks still get in.
+ */
+static uint_t l2arc_keep_hot_pct = 0;
 
 /*
  * Performance tuning of L2ARC persistence:
@@ -7492,6 +7505,8 @@ arc_kstat_update(kstat_t *ksp, int rw)
 	    wmsum_value(&arc_sums.arcstat_l2_evict_reading);
 	as->arcstat_l2_evict_l1cached.value.ui64 =
 	    wmsum_value(&arc_sums.arcstat_l2_evict_l1cached);
+	as->arcstat_l2_keep_hot.value.ui64 =
+	    wmsum_value(&arc_sums.arcstat_l2_keep_hot);
 	as->arcstat_l2_free_on_write.value.ui64 =
 	    wmsum_value(&arc_sums.arcstat_l2_free_on_write);
 	as->arcstat_l2_abort_lowmem.value.ui64 =
@@ -7847,6 +7862,7 @@ arc_state_init(void)
 	wmsum_init(&arc_sums.arcstat_l2_evict_lock_retry, 0);
 	wmsum_init(&arc_sums.arcstat_l2_evict_reading, 0);
 	wmsum_init(&arc_sums.arcstat_l2_evict_l1cached, 0);
+	wmsum_init(&arc_sums.arcstat_l2_keep_hot, 0);
 	wmsum_init(&arc_sums.arcstat_l2_free_on_write, 0);
 	wmsum_init(&arc_sums.arcstat_l2_abort_lowmem, 0);
 	wmsum_init(&arc_sums.arcstat_l2_cksum_bad, 0);
@@ -8006,6 +8022,7 @@ arc_state_fini(void)
 	wmsum_fini(&arc_sums.arcstat_l2_evict_lock_retry);
 	wmsum_fini(&arc_sums.arcstat_l2_evict_reading);
 	wmsum_fini(&arc_sums.arcstat_l2_evict_l1cached);
+	wmsum_fini(&arc_sums.arcstat_l2_keep_hot);
 	wmsum_fini(&arc_sums.arcstat_l2_free_on_write);
 	wmsum_fini(&arc_sums.arcstat_l2_abort_lowmem);
 	wmsum_fini(&arc_sums.arcstat_l2_cksum_bad);
@@ -9292,12 +9309,47 @@ l2arc_get_write_rate(l2arc_dev_t *dev)
 }
 
 /*
+ * Copy a block that the write hand is about to overwrite to the hand.
+ * The bytes are copied as they lie on the device, compressed or encrypted
+ * as they are; readers still verify them against the block pointer, as
+ * for any L2ARC read.  A block already at the hand needs no copy.
+ */
+static boolean_t
+l2arc_keep_hot_move(l2arc_dev_t *dev, arc_buf_hdr_t *hdr, uint64_t asize)
+{
+	uint64_t from = hdr->b_l2hdr.b_daddr;
+	abd_t *abd;
+	int err;
+
+	ASSERT(MUTEX_HELD(HDR_LOCK(hdr)));
+	ASSERT(!MUTEX_HELD(&dev->l2ad_mtx));
+	ASSERT3U(from, >=, dev->l2ad_hand);
+
+	if (from == dev->l2ad_hand)
+		return (B_TRUE);
+
+	abd = abd_alloc_for_io(asize, HDR_ISTYPE_METADATA(hdr));
+	err = zio_wait(zio_read_phys(NULL, dev->l2ad_vdev, from, asize, abd,
+	    ZIO_CHECKSUM_OFF, NULL, NULL, ZIO_PRIORITY_ASYNC_READ,
+	    ZIO_FLAG_CANFAIL | ZIO_FLAG_DONT_PROPAGATE | ZIO_FLAG_DONT_RETRY,
+	    B_FALSE));
+	if (err == 0) {
+		err = zio_wait(zio_write_phys(NULL, dev->l2ad_vdev,
+		    dev->l2ad_hand, asize, abd, ZIO_CHECKSUM_OFF, NULL, NULL,
+		    ZIO_PRIORITY_ASYNC_WRITE, ZIO_FLAG_CANFAIL, B_FALSE));
+	}
+	abd_free(abd);
+
+	return (err == 0);
+}
+
+/*
  * Evict buffers from the device write hand to the distance specified in
  * bytes. This distance may span populated buffers, it may span nothing.
  * This is clearing a region on the L2ARC device ready for writing.
  * If the 'all' boolean is set, every buffer is evicted.
  */
-static void
+static uint64_t
 l2arc_evict(l2arc_dev_t *dev, uint64_t distance, boolean_t all)
 {
 	list_t *buflist;
@@ -9307,6 +9359,7 @@ l2arc_evict(l2arc_dev_t *dev, uint64_t distance, boolean_t all)
 	l2arc_lb_ptr_buf_t *lb_ptr_buf, *lb_ptr_buf_prev;
 	vdev_t *vd = dev->l2ad_vdev;
 	boolean_t rerun;
+	uint64_t keep_budget = 0, kept = 0;
 
 	ASSERT(vd != NULL || all);
 	ASSERT(dev->l2ad_spa != NULL || all);
@@ -9375,6 +9428,18 @@ top:
 			 * evict hand is useful.
 			 */
 			dev->l2ad_evict = MAX(dev->l2ad_evict, taddr);
+
+			/*
+			 * A kept block is read back from where it lies, so
+			 * not where the range was just trimmed, and not when
+			 * the range runs to the end of the device and the
+			 * hand is about to wrap.
+			 */
+			if (!rerun && !(vd->vdev_has_trim &&
+			    l2arc_trim_ahead > 0)) {
+				keep_budget = distance *
+				    MIN(l2arc_keep_hot_pct, 50) / 100;
+			}
 		}
 	}
 
@@ -9459,6 +9524,39 @@ retry:
 			break;
 		}
 
+		if (!HDR_HAS_L1HDR(hdr) && hdr->b_l2hdr.b_hits > 0 &&
+		    kept + (uint64_t)HDR_GET_L2SIZE(hdr) <= keep_budget) {
+			uint64_t asize = (uint64_t)HDR_GET_L2SIZE(hdr);
+			boolean_t moved;
+
+			/*
+			 * The hash lock keeps the header from being freed or
+			 * reallocated while l2ad_mtx is dropped for the I/O,
+			 * and keeps readers off it until it has moved.
+			 */
+			mutex_exit(&dev->l2ad_mtx);
+			moved = l2arc_keep_hot_move(dev, hdr, asize);
+			mutex_enter(&dev->l2ad_mtx);
+
+			if (moved) {
+				list_remove(buflist, hdr);
+				hdr->b_l2hdr.b_daddr = dev->l2ad_hand;
+				hdr->b_l2hdr.b_hits = 0;
+				list_insert_head(buflist, hdr);
+				dev->l2ad_hand += asize;
+				dev->l2ad_dwpd_writes += asize;
+				kept += asize;
+				ARCSTAT_BUMP(arcstat_l2_keep_hot);
+			} else {
+				arc_change_state(arc_anon, hdr);
+				arc_hdr_destroy(hdr);
+			}
+			mutex_exit(hash_lock);
+			mutex_exit(&dev->l2ad_mtx);
+			/* hdr_prev may have gone while l2ad_mtx was out. */
+			goto retry;
+		}
+
 		if (!HDR_HAS_L1HDR(hdr)) {
 			ASSERT(!HDR_L2_READING(hdr));
 			/*
@@ -9517,10 +9615,12 @@ out:
 		 * assertions may be violated without functional consequences
 		 * as the device is about to be removed.
 		 */
-		ASSERT3U(dev->l2ad_hand + distance, <=, dev->l2ad_end);
+		ASSERT3U(dev->l2ad_hand + distance - kept, <=, dev->l2ad_end);
 		if (!dev->l2ad_first)
 			ASSERT3U(dev->l2ad_hand, <=, dev->l2ad_evict);
 	}
+
+	return (kept);
 }
 
 /*
@@ -10284,9 +10384,11 @@ l2arc_feed_thread(void *arg)
 		size = l2arc_write_size(dev, &interval);
 
 		/*
-		 * Evict L2ARC buffers that will be overwritten.
+		 * Evict L2ARC buffers that will be overwritten.  Blocks
+		 * kept instead use up part of the space evicted for this
+		 * feed, and part of its write budget.
 		 */
-		l2arc_evict(dev, size, B_FALSE);
+		size -= l2arc_evict(dev, size, B_FALSE);
 
 		/*
 		 * Write ARC buffers.
@@ -10388,7 +10490,7 @@ l2arc_rebuild_dev(l2arc_dev_t *dev, boolean_t reopen)
 			if (!l2arc_rebuild_enabled) {
 				return;
 			} else {
-				l2arc_evict(dev, 0, B_TRUE);
+				(void) l2arc_evict(dev, 0, B_TRUE);
 				/* start a new log block */
 				dev->l2ad_log_ent_idx = 0;
 				dev->l2ad_log_blk_payload_asize = 0;
@@ -11783,6 +11885,9 @@ ZFS_MODULE_PARAM(zfs_l2arc, l2arc_, headroom_boost, U64, ZMOD_RW,
 
 ZFS_MODULE_PARAM(zfs_l2arc, l2arc_, trim_ahead, U64, ZMOD_RW,
 	"TRIM ahead L2ARC write size multiplier");
+
+ZFS_MODULE_PARAM(zfs_l2arc, l2arc_, keep_hot_pct, UINT, ZMOD_RW,
+	"Percent of each L2ARC eviction window used to keep hot blocks");
 
 ZFS_MODULE_PARAM(zfs_l2arc, l2arc_, feed_secs, U64, ZMOD_RW,
 	"Seconds between L2ARC writing");

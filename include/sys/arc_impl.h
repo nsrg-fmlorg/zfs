@@ -849,6 +849,13 @@ typedef struct arc_stats {
 	kstat_named_t arcstat_l2_evict_lock_retry;
 	kstat_named_t arcstat_l2_evict_reading;
 	kstat_named_t arcstat_l2_evict_l1cached;
+	/*
+	 * Number of L2ARC-only blocks the write hand would have
+	 * overwritten that were copied ahead of it instead, because they
+	 * had been read from the L2ARC since they were last written
+	 * (l2arc_keep_hot_pct).
+	 */
+	kstat_named_t arcstat_l2_keep_hot;
 	kstat_named_t arcstat_l2_free_on_write;
 	kstat_named_t arcstat_l2_abort_lowmem;
 	kstat_named_t arcstat_l2_cksum_bad;
@@ -1020,6 +1027,7 @@ typedef struct arc_sums {
 	wmsum_t arcstat_l2_evict_lock_retry;
 	wmsum_t arcstat_l2_evict_reading;
 	wmsum_t arcstat_l2_evict_l1cached;
+	wmsum_t arcstat_l2_keep_hot;
 	wmsum_t arcstat_l2_free_on_write;
 	wmsum_t arcstat_l2_abort_lowmem;
 	wmsum_t arcstat_l2_cksum_bad;
