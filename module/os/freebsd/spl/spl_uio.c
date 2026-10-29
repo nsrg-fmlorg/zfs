@@ -81,6 +81,33 @@ zfs_uiomove_abd(abd_t *abd, size_t off, size_t n, zfs_uio_rw_t rw,
 	return (arg.ret);
 }
 
+struct uio_fault_move_arg {
+	struct uio *uio;
+	int ret;
+};
+
+static int
+uio_fault_move_abd_cb(void *buf, size_t size, void *private)
+{
+	struct uio_fault_move_arg *arg = private;
+
+	arg->ret = vn_io_fault_uiomove(buf, (int)size, arg->uio);
+	return (arg->ret != 0);
+}
+
+/*
+ * vn_io_fault_uiomove() for an abd: each mapped chunk in turn, so that a
+ * page fault on the user's buffer is handled as it is for a flat one.
+ */
+static int
+uio_fault_move_abd(abd_t *abd, size_t off, size_t n, struct uio *uio)
+{
+	struct uio_fault_move_arg arg = { uio, 0 };
+
+	(void) abd_iterate_func(abd, off, n, uio_fault_move_abd_cb, &arg);
+	return (arg.ret);
+}
+
 /*
  * same as zfs_uiomove() but doesn't modify uio structure.
  * return in cbytes how many bytes were copied.
@@ -129,7 +156,7 @@ zfs_uiocopy_abd(abd_t *abd, size_t off, size_t n, zfs_uio_rw_t rw,
 		uio_clone = cloneuio(GET_UIO_STRUCT(uio));
 	}
 
-	error = zfs_uiomove_abd(abd, off, n, rw, uio_clone);
+	error = uio_fault_move_abd(abd, off, n, uio_clone);
 	*cbytes = zfs_uio_resid(uio) - uio_clone->uio_resid;
 	if (uio_clone != &small_uio_clone)
 		zfs_freeuio(uio_clone);
@@ -159,6 +186,14 @@ zfs_uio_fault_move(void *p, size_t n, zfs_uio_rw_t dir, zfs_uio_t *uio)
 {
 	ASSERT3U(zfs_uio_rw(uio), ==, dir);
 	return (vn_io_fault_uiomove(p, n, GET_UIO_STRUCT(uio)));
+}
+
+int
+zfs_uio_fault_move_abd(abd_t *abd, size_t off, size_t n, zfs_uio_rw_t dir,
+    zfs_uio_t *uio)
+{
+	ASSERT3U(zfs_uio_rw(uio), ==, dir);
+	return (uio_fault_move_abd(abd, off, n, GET_UIO_STRUCT(uio)));
 }
 
 /*
