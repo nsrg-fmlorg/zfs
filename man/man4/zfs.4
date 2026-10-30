@@ -92,6 +92,14 @@ when the DDT can not report the correct reference count.
 Limit the amount we can prefetch with one call to this amount in bytes.
 This helps to limit the amount of memory that can be used by prefetching.
 .
+.It Sy dmu_arc_range_read Ns = Ns Sy 1 Ns | Ns 0 Pq int
+Answer a read of a file or volume that finds its block in the ARC but not in
+the dbuf cache by copying only the requested range out of the ARC buffer,
+rather than first copying the whole record into a new buffer for the dbuf.
+Blocks the ARC holds compressed, encrypted or in a single linear buffer are
+read the usual way.
+If this setting is 0, all such reads go through the dbuf as before.
+.
 .It Sy l2arc_feed_again Ns = Ns Sy 1 Ns | Ns 0 Pq int
 Turbo L2ARC warm-up.
 When the L2ARC is cold the fill interval will be set as fast as possible.
