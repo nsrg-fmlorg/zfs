@@ -11,12 +11,17 @@ nsrg=$(cd "$(dirname "$0")/.." && pwd)
 param=/sys/module/zfs/parameters
 ROUNDS=2
 SECS=30
-# default: as shipped.  minpf: prefetched blocks lose their minimum ARC
-# lifetime (1 ms instead of 1 s), so eviction never skips them as too
-# young.  nopf: no predictive prefetch at all.  If the spread and the
-# waits go with either, young prefetched headers are what eviction trips
-# over.
-CONDS="default minpf nopf"
+# Run 41109710985 found the per-second bandwidth set by how far apart
+# the four readers of the one file are: together they share what the
+# leader read, more than an ARC apart each reads for itself.  Fix that
+# state instead of leaving it to chance:
+#   same  four jobs on one file from offset 0, as before (left to chance)
+#   one   a single job
+#   sep   four jobs, each on its own 1G file
+#   off   four jobs on the one file, started 1G apart (always apart)
+# sep runs last: its four files replace the 4G one, as both would not
+# fit the 6G vdev.
+MODES="same one off sep"
 
 command -v bpftrace >/dev/null 2>&1 ||
     sudo apt-get install -y -qq bpftrace >/dev/null 2>&1 || true
@@ -81,9 +86,17 @@ kprobe:arc_evict_state { @evict_state = count(); }"
 	    > "$out/trace-$1.txt" 2>&1 || true
 }
 
-fio_read() {	# fio_read <tag>
-	sudo fio --name=r --filename=/evict1m/f --rw=read --bs=1M \
-	    --numjobs=4 --size=4G --time_based --runtime=$SECS \
+fio_read() {	# fio_read <tag> <mode>
+	case $2 in
+	same) shape="--filename=/evict1m/f --numjobs=4 --size=4G" ;;
+	one) shape="--filename=/evict1m/f --numjobs=1 --size=4G" ;;
+	sep) shape="--directory=/evict1m/sep --numjobs=4 --size=1G" ;;
+	off) shape="--filename=/evict1m/f --numjobs=4 --size=1G \
+	    --offset_increment=1G" ;;
+	esac
+	# shellcheck disable=SC2086
+	sudo fio --name=r $shape --rw=read --bs=1M \
+	    --time_based --runtime=$SECS \
 	    --group_reporting --write_bw_log="$out/bw-$1" \
 	    --log_avg_msec=1000 --output-format=json |
 	    jq -r --arg l "$label" --arg t "$1" \
@@ -125,18 +138,27 @@ setcond() {	# setcond <cond>
 	    "$(cat $param/zfs_prefetch_disable)" >> "$out"/params.tsv
 }
 
-for cond in $CONDS; do
-setcond "$cond"
+setcond default
+for mode in $MODES; do
+if [ "$mode" = sep ]; then
+	sudo rm -f /evict1m/f
+	sudo mkdir -p /evict1m/sep
+	for j in 0 1 2 3; do
+		sudo dd if=/dev/urandom of=/evict1m/sep/r.$j.0 bs=1M \
+		    count=1024 status=none
+	done
+	sudo "$src"/zpool sync evict1m
+fi
 round=1
 while [ $round -le $ROUNDS ]; do
 	for t in A A2; do
-		tag="$cond-r$round-$t"
+		tag="$mode-r$round-$t"
 		rm -f "$out/stop"
 		sampler "$tag" &
 		spid=$!
 		trace "$tag" &
 		tpid=$!
-		fio_read "$tag"
+		fio_read "$tag" "$mode"
 		touch "$out/stop"
 		wait "$spid" || true
 		wait "$tpid" || true
@@ -144,7 +166,6 @@ while [ $round -le $ROUNDS ]; do
 	round=$((round + 1))
 done
 done
-setcond default
 rm -f "$out/stop"
 
 sudo "$src"/zpool destroy evict1m
