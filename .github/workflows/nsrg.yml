@@ -164,3 +164,19 @@ jobs:
         with:
           name: measure
           path: /var/tmp/measure
+
+  oldkernel:
+    # Linux-Minimum in META is 4.18 and the runner's kernel is far newer,
+    # so build against older distributions' headers where a branch's
+    # compatibility code takes other paths.  Steps, not the job, are
+    # gated: hashFiles() is not available in a job-level if.
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ['ubuntu:20.04', 'debian:trixie']
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - if: hashFiles('.github/nsrg/oldkernel-defines') != ''
+        run: .github/nsrg/oldkernel.sh ${{ matrix.image }}
