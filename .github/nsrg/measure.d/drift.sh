@@ -11,16 +11,24 @@ set -eu
 label=$1 src=$2 out=$3
 nsrg=$(cd "$(dirname "$0")/.." && pwd)
 param=/sys/module/zfs/parameters
-RUNS=4
+RUNS=3
 SECS=30
 # Run 41124334438: on this branch the readers wander more than
 # zfetch_max_reorder (16M) apart, become separate prefetch streams and
 # stall on demand misses; on master they stay in lockstep within 6M.
 #   default  as shipped, with dbuf_read timed: on master followers should
 #            wait in dbuf_read for the leader's fill (DB_READ), here not
-#   reorder  zfetch_max_reorder raised to the ARC size, so a follower
-#            within the ARC stays on the leader's stream
-CONDS="default reorder"
+# Run 41128647606: widening zfetch_max_reorder did not help.  On master
+# the first reader of each block spends ~150 us filling the dbuf from the
+# ARC (a 1M copy into a linear buffer) and the others read it in 1-4 us,
+# so whoever leads is slowed and the others close up; this branch shares
+# the buffer and the leader pays nothing.  Test that cause directly:
+#   noscatter  zfs_abd_scatter_enabled=0 gives the ARC linear buffers,
+#              which master shares too (arc_buf_alloc_impl), so master
+#              loses its leader penalty; the prediction is that master
+#              then drifts as this branch does, and this branch is
+#              unchanged.
+CONDS="default noscatter"
 
 ARC="size c demand_data_hits demand_data_misses demand_data_iohits \
     prefetch_data_hits prefetch_data_misses prefetch_data_iohits \
@@ -108,14 +116,16 @@ sudo "$src"/zpool sync drift
 
 command -v bpftrace >/dev/null 2>&1 ||
     sudo apt-get install -y -qq bpftrace >/dev/null 2>&1 || true
-reorder0=$(cat $param/zfetch_max_reorder)
 for cond in $CONDS; do
 	case $cond in
-	default) echo "$reorder0" ;;
-	reorder) echo $((512 * 1024 * 1024)) ;;
-	esac | sudo tee $param/zfetch_max_reorder >/dev/null
-	printf '%s\t%s\tzfetch_max_reorder=%s\n' "$label" "$cond" \
-	    "$(cat $param/zfetch_max_reorder)" >> "$out"/params.tsv
+	default) echo 1 ;;
+	noscatter) echo 0 ;;
+	esac | sudo tee $param/zfs_abd_scatter_enabled >/dev/null
+	# Empty the ARC so every block comes back in a buffer of the new kind.
+	sudo "$src"/zpool export drift
+	sudo "$src"/zpool import -d /dev/shm drift
+	printf '%s\t%s\tzfs_abd_scatter_enabled=%s\n' "$label" "$cond" \
+	    "$(cat $param/zfs_abd_scatter_enabled)" >> "$out"/params.tsv
 	i=1
 	while [ $i -le $RUNS ]; do
 		tag="$cond-run$i"
@@ -131,7 +141,7 @@ for cond in $CONDS; do
 		i=$((i + 1))
 	done
 done
-echo "$reorder0" | sudo tee $param/zfetch_max_reorder >/dev/null
+echo 1 | sudo tee $param/zfs_abd_scatter_enabled >/dev/null
 rm -f "$out/stop"
 
 sudo "$src"/zpool destroy drift
