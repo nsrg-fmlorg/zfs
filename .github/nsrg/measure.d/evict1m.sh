@@ -9,8 +9,14 @@ set -eu
 label=$1 src=$2 out=$3
 nsrg=$(cd "$(dirname "$0")/.." && pwd)
 param=/sys/module/zfs/parameters
-ROUNDS=3
+ROUNDS=2
 SECS=30
+# default: as shipped.  minpf: prefetched blocks lose their minimum ARC
+# lifetime (1 ms instead of 1 s), so eviction never skips them as too
+# young.  nopf: no predictive prefetch at all.  If the spread and the
+# waits go with either, young prefetched headers are what eviction trips
+# over.
+CONDS="default minpf nopf"
 
 command -v bpftrace >/dev/null 2>&1 ||
     sudo apt-get install -y -qq bpftrace >/dev/null 2>&1 || true
@@ -21,7 +27,9 @@ kstat() {	# kstat <file> <name>
 
 ARCS="size c data_size overhead_size mru_data mfu_data \
     mru_evictable_data mfu_evictable_data evict_skip evict_not_enough \
-    mutex_miss evict_l2_skip memory_throttle_count arc_need_free"
+    mutex_miss evict_l2_skip memory_throttle_count arc_need_free \
+    evict_l2_ineligible demand_data_hits demand_data_misses \
+    prefetch_data_hits prefetch_data_misses demand_hit_predictive_prefetch"
 
 sampler() {	# sampler <tag>: one line a second until the stop file appears
 	while [ ! -e "$out/stop" ]; do
@@ -104,10 +112,25 @@ sudo "$src"/zpool create -f -O compression=off -O recordsize=1M \
 sudo dd if=/dev/urandom of=/evict1m/f bs=1M count=4096 status=none
 sudo "$src"/zpool sync evict1m
 
+setcond() {	# setcond <cond>
+	case $1 in
+	default) ms=0 pf=0 ;;
+	minpf) ms=1 pf=0 ;;
+	nopf) ms=0 pf=1 ;;
+	esac
+	echo "$ms" | sudo tee $param/zfs_arc_min_prefetch_ms >/dev/null
+	echo "$pf" | sudo tee $param/zfs_prefetch_disable >/dev/null
+	printf '%s\t%s\tmin_prefetch_ms=%s prefetch_disable=%s\n' \
+	    "$label" "$1" "$(cat $param/zfs_arc_min_prefetch_ms)" \
+	    "$(cat $param/zfs_prefetch_disable)" >> "$out"/params.tsv
+}
+
+for cond in $CONDS; do
+setcond "$cond"
 round=1
 while [ $round -le $ROUNDS ]; do
 	for t in A A2; do
-		tag="r$round-$t"
+		tag="$cond-r$round-$t"
 		rm -f "$out/stop"
 		sampler "$tag" &
 		spid=$!
@@ -120,6 +143,8 @@ while [ $round -le $ROUNDS ]; do
 	done
 	round=$((round + 1))
 done
+done
+setcond default
 rm -f "$out/stop"
 
 sudo "$src"/zpool destroy evict1m
