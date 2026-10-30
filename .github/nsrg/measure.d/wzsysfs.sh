@@ -18,6 +18,15 @@ dev=$(basename "$(readlink -f /dev/zvol/wz/vol)")
 		    "$(cat /sys/block/"$dev"/queue/$f 2>/dev/null || echo absent)"
 	done
 	grep -h 'WZEROES_UNMAP' "$src"/zfs_config.h || echo "no WZEROES_UNMAP in zfs_config.h"
+	# What userspace sees: punch-hole allows no zero-writing fallback,
+	# zero-range does.
+	for op in "-p" "-z"; do
+		if err=$(sudo fallocate $op -o 0 -l 1M /dev/"$dev" 2>&1); then
+			echo "fallocate $op: ok"
+		else
+			echo "fallocate $op: failed: $err"
+		fi
+	done
 } | tee "$out"/sysfs.txt | tee -a "$out"/summary.md
 sudo "$src"/zpool destroy wz
 sudo rm -f /var/tmp/wz-vdev
