@@ -11,8 +11,16 @@ set -eu
 label=$1 src=$2 out=$3
 nsrg=$(cd "$(dirname "$0")/.." && pwd)
 param=/sys/module/zfs/parameters
-RUNS=8
+RUNS=4
 SECS=30
+# Run 41124334438: on this branch the readers wander more than
+# zfetch_max_reorder (16M) apart, become separate prefetch streams and
+# stall on demand misses; on master they stay in lockstep within 6M.
+#   default  as shipped, with dbuf_read timed: on master followers should
+#            wait in dbuf_read for the leader's fill (DB_READ), here not
+#   reorder  zfetch_max_reorder raised to the ARC size, so a follower
+#            within the ARC stays on the leader's stream
+CONDS="default reorder"
 
 ARC="size c demand_data_hits demand_data_misses demand_data_iohits \
     prefetch_data_hits prefetch_data_misses prefetch_data_iohits \
@@ -43,6 +51,24 @@ sampler() {	# sampler <tag>: one line a second until the stop file appears
 		printf '\n'
 		sleep 1
 	done >> "$out"/samples.tsv
+}
+
+# dbuf_read is exported, so it keeps a symbol to probe.
+trace() {	# trace <tag>
+	command -v bpftrace >/dev/null 2>&1 || return 0
+	cat > "$out/trace.bt" <<'BT'
+kprobe:dbuf_read { @s[tid] = nsecs; }
+kretprobe:dbuf_read /@s[tid]/ {
+	@us = hist((nsecs - @s[tid]) / 1000);
+	@n = count();
+	if (nsecs - @s[tid] > 20000) { @over20us = count(); }
+	delete(@s[tid]);
+}
+BT
+	# The output belongs to the runner, as the rest of $out does.
+	# shellcheck disable=SC2024
+	sudo timeout $((SECS + 5)) bpftrace "$out/trace.bt" \
+	    > "$out/trace-$1.txt" 2>&1 || true
 }
 
 fio_read() {	# fio_read <tag>
@@ -80,17 +106,32 @@ sudo "$src"/zpool create -f -O compression=off -O recordsize=1M \
 sudo dd if=/dev/urandom of=/drift/f bs=1M count=4096 status=none
 sudo "$src"/zpool sync drift
 
-i=1
-while [ $i -le $RUNS ]; do
-	tag="run$i"
-	rm -f "$out/stop"
-	sampler "$tag" &
-	spid=$!
-	fio_read "$tag"
-	touch "$out/stop"
-	wait "$spid" || true
-	i=$((i + 1))
+command -v bpftrace >/dev/null 2>&1 ||
+    sudo apt-get install -y -qq bpftrace >/dev/null 2>&1 || true
+reorder0=$(cat $param/zfetch_max_reorder)
+for cond in $CONDS; do
+	case $cond in
+	default) echo "$reorder0" ;;
+	reorder) echo $((512 * 1024 * 1024)) ;;
+	esac | sudo tee $param/zfetch_max_reorder >/dev/null
+	printf '%s\t%s\tzfetch_max_reorder=%s\n' "$label" "$cond" \
+	    "$(cat $param/zfetch_max_reorder)" >> "$out"/params.tsv
+	i=1
+	while [ $i -le $RUNS ]; do
+		tag="$cond-run$i"
+		rm -f "$out/stop"
+		sampler "$tag" &
+		spid=$!
+		trace "$tag" &
+		tpid=$!
+		fio_read "$tag"
+		touch "$out/stop"
+		wait "$spid" || true
+		wait "$tpid" || true
+		i=$((i + 1))
+	done
 done
+echo "$reorder0" | sudo tee $param/zfetch_max_reorder >/dev/null
 rm -f "$out/stop"
 
 sudo "$src"/zpool destroy drift
