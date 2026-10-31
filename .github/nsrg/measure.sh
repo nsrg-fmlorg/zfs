@@ -26,7 +26,9 @@ for script in "$@"; do
 	for side in base head; do
 		if [ $side = base ]; then src=$base; else src=$HERE; fi
 		mkdir -p "$OUT/$name/$side"
-		"$HERE/$script" $side "$src" "$OUT/$name/$side"
+		# One script failing must not hide the others' results.
+		"$HERE/$script" $side "$src" "$OUT/$name/$side" ||
+		    echo "$name $side: failed" | tee -a "$GITHUB_STEP_SUMMARY"
 	done
 	if [ -f "$OUT/$name/head/summary.md" ]; then
 		cat "$OUT/$name/head/summary.md" >> "$GITHUB_STEP_SUMMARY"
