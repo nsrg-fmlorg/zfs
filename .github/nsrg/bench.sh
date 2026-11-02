@@ -82,8 +82,13 @@ measure() {
 	for w in $WORKLOADS; do
 		rw=${w%:*}
 		bs=${w#*:}
+		# Each job reads its own quarter of the file.  Four jobs on the
+		# whole file drift between running together, where the later
+		# ones read what the first put in the ARC, and running apart,
+		# and the result measured the drift rather than the code.
 		sudo fio --name="$rw" --directory=/bench \
-		    --filename=fill.0.0 --size=4G --rw="$rw" --bs="$bs" \
+		    --filename=fill.0.0 --size=1G --offset_increment=1G \
+		    --rw="$rw" --bs="$bs" \
 		    --numjobs=4 --time_based --runtime=30 --group_reporting \
 		    --output-format=json |
 		    jq -r --arg l "$label" --arg w "$w" '[$l, $w,
