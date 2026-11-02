@@ -19,26 +19,18 @@ jobs:
         with:
           fetch-depth: 0
       - run: .github/nsrg/deps.sh
-      # On the base of this branch, without the volume Direct I/O
-      # commits, and then on this branch.
+      # The base of this branch, without the volume Direct I/O commits.
       - run: |
           git fetch -q origin nsrg/ci
           git worktree add -q /var/tmp/base FETCH_HEAD
           .github/nsrg/build.sh /var/tmp/base debug
           .github/nsrg/load.sh /var/tmp/base
           cd /var/tmp/base
-          sudo REPRO_DIRECT=none REPRO_PREFILL=no \
-              "$GITHUB_WORKSPACE"/.github/nsrg/repro/zvol-dio-replay.sh ||
-              echo "base: exit $?"
-          sudo mv /var/tmp/repro /var/tmp/repro-base
-      - run: .github/nsrg/build.sh . debug
-      - run: .github/nsrg/load.sh .
-      - run: >
-          sudo REPRO_PREFILL=no .github/nsrg/repro/zvol-dio-replay.sh
+          sudo DIAG_CASES=hdr \
+              "$GITHUB_WORKSPACE"/.github/nsrg/repro/zvol-replay-diag.sh
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: repro
           path: |
-            /var/tmp/repro
-            /var/tmp/repro-base
+            /var/tmp/diag
