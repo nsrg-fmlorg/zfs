@@ -163,11 +163,16 @@ log_must destroy_pool $MPOOL
 
 log_note "6. interleaved direct and buffered sync writes survive replay"
 new_zvol -o compression=off
-# No fill before the freeze: on master, writing 16M, syncing, freezing and
-# then making two or more sync writes trips VERIFY3U(max_lr_seq, <,
-# lr->lrc_seq) in zil_parse() at import, with or without Direct I/O.
-# That is a separate bug; every block compared below is written here.
-sync_pool $TESTPOOL
+# Records written after the freeze are only found at import if the ZIL
+# header is already on disk, as in slog_replay_fs_002.  A sync write to
+# a block that is not compared puts it there.
+log_must dd if="$DATA" of="$ZDEV" oflag=dsync bs=$BLK count=1 skip=60 \
+    seek=60 conv=notrunc status=none
+# The last close of a volume closes its ZIL, and the next open starts the
+# record sequence again; with the pool frozen the old records stay in the
+# chain and zil_parse() finds the sequence going backwards.  Hold the
+# volume open until the export.
+exec 3<> $ZDEV
 log_must zpool freeze $TESTPOOL
 # Even blocks direct, odd blocks buffered, then an overlapping pass the
 # other way round over the first half: the replayed volume must end up
@@ -191,8 +196,9 @@ for ((i = 0; i < 8; i++)); do
 	log_must dd if="$DATA" of="$ZDEV" $f bs=$BLK count=1 \
 	    skip=$((i + 32)) seek=$i conv=notrunc status=none
 done
+exec 3<&-
 log_must_busy zpool export $TESTPOOL
-log_must zpool import $TESTPOOL
+log_must zpool import -f $TESTPOOL
 block_device_wait $ZDEV
 # Expected: blocks 0-7 from DATA blocks 32-39, blocks 8-15 from 8-15.
 log_must dd if="$DATA" of="$EXPECT" bs=$BLK skip=32 count=8 status=none
