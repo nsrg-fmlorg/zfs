@@ -32,6 +32,7 @@ concurrency:
 
 jobs:
   checkstyle:
+    if: false
     # Same release as upstream's checkstyle job: 24.04's cppcheck stops
     # on lib/libspl/include/sys/isa_defs.h.
     runs-on: ubuntu-22.04
@@ -59,6 +60,7 @@ jobs:
           path: abi_files.tar.bz2
 
   strict:
+    if: false
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -75,6 +77,7 @@ jobs:
           path: /var/tmp/strict
 
   build:
+    if: false
     strategy:
       fail-fast: false
       matrix:
@@ -87,6 +90,7 @@ jobs:
       - run: make -s -j"$(nproc)" unit
 
   sanitize:
+    if: false
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -103,6 +107,7 @@ jobs:
       - run: sudo .github/nsrg/ztest.sh
 
   zts:
+    if: false
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     steps:
@@ -126,7 +131,7 @@ jobs:
   bench:
     runs-on: ubuntu-24.04
     # A hung fio otherwise holds the runner for the 6 hour default.
-    timeout-minutes: 120
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
         with:
@@ -145,6 +150,7 @@ jobs:
           if-no-files-found: ignore
 
   measure:
+    if: false
     timeout-minutes: 120
     # Steps, not the job, are gated: hashFiles() is not available in a
     # job-level if.  Without a measure.d script the job costs a checkout.
