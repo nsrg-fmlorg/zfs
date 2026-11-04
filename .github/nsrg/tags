@@ -1,1 +1,1 @@
-arc,cache
+compression,zfs_set,nopwrite,bootfs,zstream,direct,bclone,rsend
