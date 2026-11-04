@@ -29,7 +29,7 @@
 .\" Copyright (c) 2019, Kjeld Schouten-Lebbing
 .\" Copyright (c) 2022 Hewlett Packard Enterprise Development LP.
 .\"
-.Dd October 30, 2026
+.Dd November 5, 2026
 .Dt ZFSPROPS 7
 .Os
 .
@@ -853,7 +853,8 @@ for more information on these algorithms.
 Changing this property affects only newly-written data.
 .It Xo
 .Sy compression Ns = Ns Sy on Ns | Ns Sy off Ns | Ns Sy gzip Ns | Ns
-.Sy gzip- Ns Ar N Ns | Ns Sy lz4 Ns | Ns Sy lzjb Ns | Ns Sy zle Ns | Ns Sy zstd Ns | Ns
+.Sy gzip- Ns Ar N Ns | Ns Sy lz4 Ns | Ns Sy lzjb Ns | Ns Sy zero-detect Ns | Ns
+.Sy zle Ns | Ns Sy zstd Ns | Ns
 .Sy zstd- Ns Ar N Ns | Ns Sy zstd-fast Ns | Ns Sy zstd-fast- Ns Ar N
 .Xc
 Controls the compression algorithm used for this dataset.
@@ -963,6 +964,23 @@ is equivalent to
 The
 .Sy zle
 compression algorithm compresses runs of zeros.
+.Pp
+The
+.Sy zero-detect
+setting compresses nothing.
+Blocks consisting of only zeroes are stored as holes, as described below, and
+all other blocks are stored uncompressed, so data that does not shrink costs
+only the check for zeroes.
+Unlike
+.Sy zle ,
+it does not spend time on blocks which contain a mix of zero and non-zero data,
+and does not save space on them.
+No pool feature is required and the blocks can be read by any implementation.
+Software that does not know this setting can import such a pool and treats the
+dataset in the same way, but displays the value as
+.Sy - ,
+and ignores it with an error message when it is a received property, leaving
+the received dataset with its default compression.
 .Pp
 This property can also be referred to by its shortened column name
 .Sy compress .

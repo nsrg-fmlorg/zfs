@@ -151,6 +151,7 @@ enum zio_checksum {
 	(compress) == ZIO_COMPRESS_GZIP_8 ||		\
 	(compress) == ZIO_COMPRESS_GZIP_9 ||		\
 	(compress) == ZIO_COMPRESS_ZLE ||		\
+	(compress) == ZIO_COMPRESS_EMPTY ||		\
 	(compress) == ZIO_COMPRESS_ZSTD ||		\
 	(compress) == ZIO_COMPRESS_ON ||		\
 	(compress) == ZIO_COMPRESS_OFF)
