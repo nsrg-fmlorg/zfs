@@ -17,7 +17,7 @@ set -eu
 
 OUT=/var/tmp/bench
 HERE=$(pwd)
-ROUNDS=5
+ROUNDS=0
 RUNTIME=10
 SIZE=1G
 ARC_MAX=$((2 * 1024 * 1024 * 1024))
@@ -181,6 +181,7 @@ done
 # under zle or lz4.
 printf 'target\taccess\tsetting\tlogicalused\tused\treferenced\n' \
     > "$OUT"/zero.tsv
+[ "$ROUNDS" -eq 0 ] ||
 for t in zvol 128k 1M; do
 	for s in off zle lz4; do
 		for a in default direct; do
@@ -227,12 +228,22 @@ kretprobe:abd_cmp_zero_off /@zs[tid]/ {
 	@zero_n[@zl[tid]] = count();
 	delete(@zs[tid]); delete(@zl[tid]);
 }
+kprobe:abd_borrow_buf_copy { @bs[tid] = nsecs; }
+kretprobe:abd_borrow_buf_copy /@bs[tid]/ {
+	@borrow_ns = sum(nsecs - @bs[tid]); @borrow_n = count();
+	delete(@bs[tid]);
+}
+kprobe:abd_return_buf_copy { @rs[tid] = nsecs; }
+kretprobe:abd_return_buf_copy /@rs[tid]/ {
+	@return_ns = sum(nsecs - @rs[tid]); @return_n = count();
+	delete(@rs[tid]);
+}
 kprobe:zio_write_compress { @ws[tid] = nsecs; }
 kretprobe:zio_write_compress /@ws[tid]/ {
 	@stage_ns = sum(nsecs - @ws[tid]); @stage_n = count();
 	delete(@ws[tid]);
 }
-END { clear(@s); clear(@c); clear(@l); clear(@zs); clear(@zl); clear(@ws); }
+END { clear(@s); clear(@c); clear(@l); clear(@zs); clear(@zl); clear(@ws); clear(@bs); clear(@rs); }
 BT
 	for c in $CONDS; do
 		for data in random half; do
@@ -243,17 +254,21 @@ BT
 				pattern_opts "$t" "$p"
 				DATA_OPTS=$(data_opts $data)
 				echo "== $t $p $data $s" >> "$OUT"/trace.txt
+				# In a script of its own: bpftrace -c splits on
+				# each space, so a long line gave fio empty
+				# arguments and no I/O was traced.  The sync is
+				# inside so that the last txg is traced too.
 				# shellcheck disable=SC2086
+				cat > "$OUT"/traced.sh <<SH
+fio --name=sq --filename=$DEV $(echo $FIO_OPTS $DATA_OPTS) --ioengine=libaio --size=$SIZE --time_based --runtime=$RUNTIME --randrepeat=0 --output=/dev/null
+$HERE/zpool sync sq
+SH
 				sudo bpftrace -q --no-warnings "$prog" -c \
-				    "/usr/bin/fio --name=sq --filename=$DEV \
-				    $(echo $FIO_OPTS $DATA_OPTS) \
-				    --ioengine=libaio --size=$SIZE \
-				    --time_based --runtime=$RUNTIME \
-				    --randrepeat=0 --output=/dev/null" \
-				    2>&1 | grep -E '^@|rror' \
+				    "/bin/sh $OUT/traced.sh" \
+				    2>"$OUT"/trace.err | grep -E '^@' \
 				    >> "$OUT"/trace.txt ||
 				    echo "bpftrace failed" >> "$OUT"/trace.txt
-				zpool sync sq
+				cat "$OUT"/trace.err >> "$OUT"/trace.txt
 				destroy
 			done
 		done
