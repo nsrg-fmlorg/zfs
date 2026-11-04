@@ -13,7 +13,7 @@ set -eu
 : "${BASE:?set BASE to the ref to compare against}"
 OUT=/var/tmp/bench
 HERE=$(pwd)
-ROUNDS=5
+ROUNDS=4
 RUNTIME=10
 SIZE=1G
 mkdir -p "$OUT"
@@ -62,7 +62,7 @@ destroy() {
 # label vbs qd mode iops clat-mean p99 (usec)
 run() {
 	# 1x4: four jobs at queue depth 1 each, as a guest with four vCPUs
-	for qd in 1 4 16 1x4; do
+	for qd in 1 4; do
 		j=${qd#*x}
 		[ "$j" != "$qd" ] || j=1
 		for mode in osync plain; do
@@ -96,15 +96,15 @@ while [ $i -lt $ROUNDS ]; do
 		destroy "$base"
 		"$HERE"/.github/nsrg/load.sh "$HERE"
 		make_zvol "$HERE" $vbs
-		param zvol_request_sync_idle 0
-		run head-off $vbs
 		param zvol_request_sync_idle 1
-		# A run that does not show the setting took effect proves
-		# nothing.
-		printf 'round %d %s zvol_request_sync_idle=%s\n' $i $vbs \
-		    "$(cat /sys/module/zfs/parameters/zvol_request_sync_idle)" \
-		    >> "$OUT"/params.txt
-		run head-on $vbs
+		for d in 64 1024 16384; do
+			param zvol_request_sync_idle_delay $d
+			run head-d$d $vbs
+		done
+		param zvol_request_sync_idle_delay 64
+		param zvol_request_sync_idle_probe 16
+		run head-p16 $vbs
+		param zvol_request_sync_idle_probe 64
 		param zvol_request_sync_idle 0
 		destroy "$HERE"
 	done
@@ -136,5 +136,4 @@ awk -F'\t' '
 	printf 'vbs\tqd\tmode\tlabel\tiops\tmin-max\tclat\tp99\tvs base\n'
 	cat "$OUT"/sorted.tsv
 } > "$OUT"/summary.tsv
-tee -a "$GITHUB_STEP_SUMMARY" < "$OUT"/params.txt
 column -t -s "$(printf '\t')" "$OUT"/summary.tsv | tee -a "$GITHUB_STEP_SUMMARY"
