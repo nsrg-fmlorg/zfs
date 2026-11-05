@@ -1,0 +1,48 @@
+name: kvm
+
+# zvol_request_sync_idle seen by counting (path) and from a KVM guest
+# whose virtio-blk disk is a zvol (guest).
+
+on:
+  push:
+    branches: ['wip/sync-idle-guest']
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  path:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - run: .github/nsrg/deps.sh
+      - run: .github/nsrg/sync-idle-path.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: path
+          path: /var/tmp/bench/path.txt
+
+  guest:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - run: .github/nsrg/deps.sh
+      - run: >
+          sudo apt-get install -y qemu-system-x86 qemu-utils
+          cloud-image-utils e2fsprogs
+      - run: .github/nsrg/build.sh . release
+      - run: .github/nsrg/load.sh .
+      - run: .github/nsrg/kvm/kvm-bench.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: kvm
+          path: |
+            /var/tmp/kvm/*.tsv
+            /var/tmp/kvm/*.txt
+            /var/tmp/kvm/*/qemu.err
