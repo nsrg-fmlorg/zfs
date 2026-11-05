@@ -4325,6 +4325,12 @@ zil_sync(zilog_t *zilog, dmu_tx_t *tx)
 			BP_ZERO(&zh->zh_log);
 	}
 
+	/*
+	 * The log chain outlives this zilog_t: see zil_alloc().
+	 */
+	if (!BP_IS_HOLE(&zh->zh_log))
+		zh->zh_lr_seq = zilog->zl_lr_seq;
+
 	mutex_exit(&zilog->zl_lock);
 }
 
@@ -4418,6 +4424,18 @@ zil_alloc(objset_t *os, zil_header_t *zh_phys)
 	zilog->zl_dirty_max_txg = 0;
 	zilog->zl_last_lwb_opened = NULL;
 	zilog->zl_last_lwb_latency = 0;
+	/*
+	 * Records must keep rising along a chain: zil_parse() stops at the
+	 * first above zh_claim_lr_seq, and replay skips those at or below
+	 * zh_replay_seq.  zil_close() leaves the chain's tail block in place
+	 * for the next writer, and zil_sync() frees what precedes it, but a
+	 * pool rewound past those syncs, or a frozen one that never made
+	 * them durable, walks the whole chain.  A zilog_t lives only as long
+	 * as its objset, which a volume's last close evicts, so the count
+	 * has to come from the header.  A file system cuts the chain instead
+	 * when it mounts: see the new GUID in zil_sync().
+	 */
+	zilog->zl_lr_seq = zh_phys->zh_lr_seq;
 	zilog->zl_max_block_size = MIN(MAX(P2ALIGN_TYPED(zil_maxblocksize,
 	    ZIL_MIN_BLKSZ, uint64_t), ZIL_MIN_BLKSZ),
 	    spa_maxblocksize(dmu_objset_spa(os)));

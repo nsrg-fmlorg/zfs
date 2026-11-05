@@ -58,7 +58,8 @@ typedef struct zil_header {
 	uint64_t zh_claim_blk_seq; /* highest claimed block sequence number */
 	uint64_t zh_flags;	/* header flags */
 	uint64_t zh_claim_lr_seq; /* highest claimed lr sequence number */
-	uint64_t zh_pad[3];
+	uint64_t zh_lr_seq;	/* highest lr sequence number assigned */
+	uint64_t zh_pad[2];
 } zil_header_t;
 
 /*
