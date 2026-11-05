@@ -1,0 +1,46 @@
+name: nsrg-repro
+
+on:
+  workflow_dispatch:
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - run: .github/nsrg/deps.sh
+      - run: .github/nsrg/build.sh . release
+      - run: .github/nsrg/load.sh .
+      - run: |
+          sudo .github/nsrg/repro/zil-seq.sh 0 vol_open vol_plain vol_frozen vol_rewind fs_frozen_nomount fs_frozen fs_rewind vol_suspend
+          sudo .github/nsrg/repro/zil-seq.sh 1 vol_open vol_plain vol_frozen vol_rewind fs_frozen fs_rewind
+      - name: new test, without the fix then with it
+        run: |
+          sudo zpool list || true
+          ls -la bin 2>/dev/null | head -3 || true
+          echo 0 | sudo tee /sys/module/zfs/parameters/zil_seq_fix
+          scripts/zfs-tests.sh -vK -s 3G -t tests/functional/slog/slog_replay_volume_reopen || true
+          echo 1 | sudo tee /sys/module/zfs/parameters/zil_seq_fix
+          scripts/zfs-tests.sh -vK -s 3G -t tests/functional/slog/slog_replay_volume_reopen || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: release
+          path: /var/tmp/diag
+  debug:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - run: .github/nsrg/deps.sh
+      - run: .github/nsrg/build.sh . debug
+      - run: .github/nsrg/load.sh .
+      - run: |
+          sudo .github/nsrg/repro/zil-seq.sh 1 vol_frozen vol_rewind fs_frozen fs_rewind vol_suspend
+          sudo .github/nsrg/repro/zil-seq.sh 0 fs_frozen fs_rewind vol_suspend vol_rewind
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: debug
+          path: /var/tmp/diag

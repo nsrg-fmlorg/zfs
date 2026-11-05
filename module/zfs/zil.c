@@ -461,6 +461,8 @@ zil_kstat_values_update(zil_kstat_values_t *zs, zil_sums_t *zil_sums)
 	    wmsum_value(&zil_sums->zil_replay_split_dropped);
 }
 
+static int zil_seq_fix = 0;
+
 /*
  * Parse the intent log, and call parse_func for each valid record within.
  */
@@ -565,6 +567,13 @@ zil_parse(zilog_t *zilog, zil_parse_blk_func_t *parse_blk_func,
 				arc_buf_destroy(abuf, &abuf);
 				goto done;
 			}
+			if (max_lr_seq >= lr->lrc_seq)
+				zfs_dbgmsg("zil_parse %px BACKWARD blk_seq "
+				    "%llu lr_seq %llu after %llu txg %llu",
+				    zilog, (u_longlong_t)blk_seq,
+				    (u_longlong_t)lr->lrc_seq,
+				    (u_longlong_t)max_lr_seq,
+				    (u_longlong_t)lr->lrc_txg);
 			ASSERT3U(max_lr_seq, <, lr->lrc_seq);
 			max_lr_seq = lr->lrc_seq;
 			lr_count++;
@@ -572,6 +581,11 @@ zil_parse(zilog_t *zilog, zil_parse_blk_func_t *parse_blk_func,
 		arc_buf_destroy(abuf, &abuf);
 	}
 done:
+	zfs_dbgmsg("zil_parse %px done blks %llu lrs %llu max_lr_seq %llu "
+	    "claim_lr_seq %llu claimed %d err %d", zilog,
+	    (u_longlong_t)blk_count, (u_longlong_t)lr_count,
+	    (u_longlong_t)max_lr_seq, (u_longlong_t)claim_lr_seq,
+	    claimed, error);
 	zilog->zl_parse_error = error;
 	zilog->zl_parse_blk_seq = max_blk_seq;
 	zilog->zl_parse_lr_seq = max_lr_seq;
@@ -4325,6 +4339,9 @@ zil_sync(zilog_t *zilog, dmu_tx_t *tx)
 			BP_ZERO(&zh->zh_log);
 	}
 
+	if (zil_seq_fix && !BP_IS_HOLE(&zh->zh_log))
+		zh->zh_pad[0] = zilog->zl_lr_seq;
+
 	mutex_exit(&zilog->zl_lock);
 }
 
@@ -4418,6 +4435,12 @@ zil_alloc(objset_t *os, zil_header_t *zh_phys)
 	zilog->zl_dirty_max_txg = 0;
 	zilog->zl_last_lwb_opened = NULL;
 	zilog->zl_last_lwb_latency = 0;
+	if (zil_seq_fix)
+		zilog->zl_lr_seq = zh_phys->zh_pad[0];
+	zfs_dbgmsg("zil_alloc %px lr_seq %llu hdr blk_seq %llu pad %llu",
+	    zilog, (u_longlong_t)zilog->zl_lr_seq,
+	    (u_longlong_t)zh_phys->zh_log.blk_cksum.zc_word[ZIL_ZC_SEQ],
+	    (u_longlong_t)zh_phys->zh_pad[0]);
 	zilog->zl_max_block_size = MIN(MAX(P2ALIGN_TYPED(zil_maxblocksize,
 	    ZIL_MIN_BLKSZ, uint64_t), ZIL_MIN_BLKSZ),
 	    spa_maxblocksize(dmu_objset_spa(os)));
@@ -4454,6 +4477,9 @@ void
 zil_free(zilog_t *zilog)
 {
 	int i;
+
+	zfs_dbgmsg("zil_free %px lr_seq %llu", zilog,
+	    (u_longlong_t)zilog->zl_lr_seq);
 
 	zilog->zl_stop_sync = 1;
 
@@ -4500,6 +4526,9 @@ zil_open(objset_t *os, zil_get_data_t *get_data, zil_sums_t *zil_sums)
 {
 	zilog_t *zilog = dmu_objset_zil(os);
 
+	zfs_dbgmsg("zil_open %px lr_seq %llu hdr blk_seq %llu", zilog,
+	    (u_longlong_t)zilog->zl_lr_seq, (u_longlong_t)zilog->zl_header->
+	    zh_log.blk_cksum.zc_word[ZIL_ZC_SEQ]);
 	ASSERT0P(zilog->zl_get_data);
 	ASSERT0P(zilog->zl_last_lwb_opened);
 	ASSERT(list_is_empty(&zilog->zl_lwb_list));
@@ -4519,6 +4548,12 @@ zil_close(zilog_t *zilog)
 	lwb_t *lwb;
 	uint64_t txg;
 
+	zfs_dbgmsg("zil_close %px lr_seq %llu commit %llu hdr blk_seq %llu "
+	    "lwbs %d", zilog, (u_longlong_t)zilog->zl_lr_seq,
+	    (u_longlong_t)zilog->zl_commit_lr_seq,
+	    (u_longlong_t)zilog->zl_header->
+	    zh_log.blk_cksum.zc_word[ZIL_ZC_SEQ],
+	    (int)list_is_empty(&zilog->zl_lwb_list));
 	if (!dmu_objset_is_snapshot(zilog->zl_os)) {
 		if (zil_commit_flags(zilog, 0, ZIL_COMMIT_NOW) != 0)
 			txg_wait_synced(zilog->zl_dmu_pool, 0);
@@ -5286,6 +5321,8 @@ EXPORT_SYMBOL(zil_kstat_values_update);
 
 ZFS_MODULE_PARAM(zfs, zfs_, commit_timeout_pct, UINT, ZMOD_RW,
 	"ZIL block open timeout percentage");
+
+ZFS_MODULE_PARAM(zfs_zil, zil_, seq_fix, INT, ZMOD_RW, "diag");
 
 ZFS_MODULE_PARAM(zfs_zil, zil_, replay_disable, INT, ZMOD_RW,
 	"Disable intent logging replay");
