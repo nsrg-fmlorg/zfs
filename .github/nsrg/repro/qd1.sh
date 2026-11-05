@@ -65,10 +65,10 @@ stages() { # stages <label> <bs> <sync>
 		    "kretprobe:$fn { exit(); } interval:ms:100 { exit(); }" \
 		    >/dev/null 2>&1; then
 			cat >> "$f" <<-BT
-			kprobe:$fn { @s[tid, "$fn"] = nsecs; }
-			kretprobe:$fn /@s[tid, "$fn"]/ {
-				@ns["$fn"] = stats(nsecs - @s[tid, "$fn"]);
-				delete(@s[tid, "$fn"]);
+			kprobe:$fn { @s_$fn[tid] = nsecs; }
+			kretprobe:$fn /@s_$fn[tid]/ {
+				@ns_$fn = stats(nsecs - @s_$fn[tid]);
+				delete(@s_$fn[tid]);
 			}
 			BT
 		else
@@ -91,14 +91,17 @@ stages() { # stages <label> <bs> <sync>
 		}
 	}
 	interval:s:18 { exit(); }
-	END { clear(@s); clear(@off); clear(@name); clear(@wk); }
+	END { clear(@off); clear(@name); clear(@wk); }
 	BT
-	sudo bpftrace "$f" > "$OUT/$1.stages" 2>&1 &
+	for m in $(grep -o '@s_[a-z_0-9]*' "$f" | sort -u); do
+		sed -i "s/^\tEND {/\tEND { clear($m);/;s/^END {/END { clear($m);/" "$f"
+	done
+	sudo BPFTRACE_MAX_BPF_PROGS=512 bpftrace "$f" > "$OUT/$1.stages" 2>&1 &
 	bp=$!
 	sleep 3
 	fio1 "$2" "$3" 1
 	wait $bp
-	sed "s/^/$1: /" "$OUT/$1.stages" | grep -E '@ns|@runq|@offcpu|ERROR'
+	sed "s/^/$1: /" "$OUT/$1.stages" | grep -E '@ns_|@runq|@offcpu|ERROR'
 }
 
 # case <label> <direct> <vbs> <bs> <sync> [verify] [request_sync]
@@ -120,7 +123,7 @@ param zfs_arc_max $((512 * 1024 * 1024))
 # Stage latency, one traced round each.
 sudo apt-get install -y -qq bpftrace >/dev/null
 for t in "standard 128k 128k 0" "always 128k 128k 0" "always 128k 1M 0" \
-    "always 4k 4k 0" "standard 4k 4k 0" "always 16k 16k 0" "standard 16k 16k 0"; do
+    "always 4k 4k 0" "standard 4k 4k 0"; do
 	set -- $t
 	param zfs_vdev_direct_write_verify 1
 	param zvol_request_sync 0
