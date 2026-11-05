@@ -139,7 +139,7 @@ jobs:
         with:
           fetch-depth: 0
       - run: .github/nsrg/deps.sh
-      - run: .github/nsrg/zvolbench.sh
+      - run: .github/nsrg/sync-idle-dio.sh
         env:
           BASE: ${{ inputs.base || 'upstream/master' }}
       - uses: actions/upload-artifact@v4
