@@ -21,6 +21,7 @@ UNIT_TESTS = \
 	%D%/test_fletcher \
 	%D%/test_sha2 \
 	%D%/test_cityhash \
+	%D%/test_zle \
 	%D%/test_nvpair \
 	%D%/test_backtrace \
 	%D%/test_timer \
@@ -103,6 +104,19 @@ nodist_%C%_test_sha2_SOURCES = \
 
 %C%_test_sha2_LDADD = \
 	libicp.la \
+	libspl.la \
+	libunit.la
+
+
+%C%_test_zle_CFLAGS = $(AM_CFLAGS)
+
+nodist_%C%_test_zle_SOURCES = \
+	module/zfs/zle.c
+
+%C%_test_zle_SOURCES = \
+	%D%/test_zle.c
+
+%C%_test_zle_LDADD = \
 	libspl.la \
 	libunit.la
 
