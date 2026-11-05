@@ -1,0 +1,14 @@
+name: nsrg-repro
+
+on:
+  workflow_dispatch:
+
+jobs:
+  repro:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - run: .github/nsrg/deps.sh
+      - run: .github/nsrg/build.sh . release
+      - run: .github/nsrg/repro/verify.sh
