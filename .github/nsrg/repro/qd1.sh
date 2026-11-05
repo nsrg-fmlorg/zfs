@@ -52,7 +52,7 @@ report() { # report <label>
 stages() { # stages <label> <bs> <sync>
 	f="$OUT/$1.bt"
 	: > "$f"
-	for fn in zvol_write zvol_write_task dmu_write_uio_dnode \
+	for fn in zvol_write dmu_write_uio_dnode \
 	    dmu_write_uio_direct dmu_write_abd_impl dmu_write_direct \
 	    zfs_uio_get_dio_pages_alloc zfs_uio_free_dio_pages \
 	    abd_alloc_from_pages dmu_buf_hold_array_by_dnode \
@@ -61,7 +61,9 @@ stages() { # stages <label> <bs> <sync>
 	    zil_commit zio_wait zio_checksum_compute zio_checksum_error \
 	    zio_vdev_io_start vdev_file_io_strategy metaslab_alloc \
 	    zio_write_compress zio_done; do
-		if sudo bpftrace -l "kprobe:$fn" | grep -q .; then
+		if sudo timeout 20 bpftrace -e \
+		    "kretprobe:$fn { exit(); } interval:ms:100 { exit(); }" \
+		    >/dev/null 2>&1; then
 			cat >> "$f" <<-BT
 			kprobe:$fn { @s[tid, "$fn"] = nsecs; }
 			kretprobe:$fn /@s[tid, "$fn"]/ {
@@ -74,6 +76,11 @@ stages() { # stages <label> <bs> <sync>
 		fi
 	done
 	cat >> "$f" <<-'BT'
+	tracepoint:sched:sched_wakeup { @wk[args->pid] = nsecs; }
+	tracepoint:sched:sched_switch /@wk[args->next_pid]/ {
+		@runq[args->next_comm] = stats(nsecs - @wk[args->next_pid]);
+		delete(@wk[args->next_pid]);
+	}
 	tracepoint:sched:sched_switch {
 		@off[args->prev_pid] = nsecs;
 		@name[args->prev_pid] = args->prev_comm;
@@ -84,14 +91,14 @@ stages() { # stages <label> <bs> <sync>
 		}
 	}
 	interval:s:18 { exit(); }
-	END { clear(@s); clear(@off); clear(@name); }
+	END { clear(@s); clear(@off); clear(@name); clear(@wk); }
 	BT
 	sudo bpftrace "$f" > "$OUT/$1.stages" 2>&1 &
 	bp=$!
 	sleep 3
 	fio1 "$2" "$3" 1
 	wait $bp
-	sed "s/^/$1: /" "$OUT/$1.stages" | grep -E '@ns|@offcpu|ERROR'
+	sed "s/^/$1: /" "$OUT/$1.stages" | grep -E '@ns|@runq|@offcpu|ERROR'
 }
 
 # case <label> <direct> <vbs> <bs> <sync> [verify] [request_sync]
@@ -110,27 +117,10 @@ case1() {
 "$HERE"/.github/nsrg/load.sh "$HERE"
 param zfs_arc_max $((512 * 1024 * 1024))
 
-for r in 1 2; do
-for d in standard always; do
-	case1 "$d/v128/b128k"		$d 128k 128k 0
-	case1 "$d/v128/b1M"		$d 128k 1M   0
-	case1 "$d/v128/b128k/sync"	$d 128k 128k 1
-	case1 "$d/v128/b128k/reqsync"	$d 128k 128k 0 1 1
-	case1 "$d/v16/b16k"		$d 16k  16k  0
-	case1 "$d/v16/b16k/sync"	$d 16k  16k  1
-	case1 "$d/v16/b4k"		$d 16k  4k   0
-	case1 "$d/v4k/b4k"		$d 4k   4k   0
-	case1 "$d/v4k/b4k/sync"		$d 4k   4k   1
-	case1 "$d/v128/b64k"		$d 128k 64k  0
-done
-case1 "always/v128/b128k/noverify"	always 128k 128k 0 0
-case1 "always/v4k/b4k/noverify"		always 4k 4k 0 0
-done
-
 # Stage latency, one traced round each.
 sudo apt-get install -y -qq bpftrace >/dev/null
 for t in "standard 128k 128k 0" "always 128k 128k 0" "always 128k 1M 0" \
-    "always 4k 4k 0" "standard 4k 4k 0"; do
+    "always 4k 4k 0" "standard 4k 4k 0" "always 16k 16k 0" "standard 16k 16k 0"; do
 	set -- $t
 	param zfs_vdev_direct_write_verify 1
 	param zvol_request_sync 0
