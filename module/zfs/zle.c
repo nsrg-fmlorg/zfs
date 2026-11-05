@@ -24,6 +24,7 @@
 #include <sys/types.h>
 #include <sys/sysmacros.h>
 #include <sys/zfs_context.h>
+#include <sys/mod.h>
 #include <sys/zio_compress.h>
 
 #define	ZLE_ONES	0x0101010101010101ULL
@@ -136,6 +137,67 @@ zfs_zle_decompress_buf(void *s_start, void *d_start, size_t s_len,
 	return (dst == d_end ? 0 : -1);
 }
 
+/* Measure-only: 0 the old encoder, 1 the pre-scan, 2 pre-scan and sample. */
+static uint_t zfs_zle_impl = 2;
+
+#define	ZLE_SAMPLES		16
+#define	ZLE_SAMPLE_LEN		64
+#define	ZLE_SAMPLE_MIN_BLOCK	(16 * 1024)
+
+static boolean_t
+zle_sample(const uchar_t *src, size_t s_len)
+{
+	size_t stride = s_len / ZLE_SAMPLES;
+
+	for (size_t i = 0; i < ZLE_SAMPLES; i++) {
+		const uchar_t *p = src + i * stride +
+		    (i * i * 61) % (stride - ZLE_SAMPLE_LEN);
+		for (int j = 0; j < ZLE_SAMPLE_LEN - 1; j += 8) {
+			if (j + 8 < ZLE_SAMPLE_LEN) {
+				uint64_t w = zle_load64(p + j);
+
+				if (((w - ZLE_ONES) & ~w & ZLE_HIGHS) == 0)
+					continue;
+			}
+			for (int k = j; k < j + 8 &&
+			    k < ZLE_SAMPLE_LEN - 1; k++)
+				if ((p[k] | p[k + 1]) == 0)
+					return (B_TRUE);
+		}
+	}
+	return (B_FALSE);
+}
+
+static size_t
+zle_original(void *s_start, void *d_start, size_t s_len, size_t d_len, int n)
+{
+	uchar_t *src = s_start;
+	uchar_t *dst = d_start;
+	uchar_t *s_end = src + s_len;
+	uchar_t *d_end = dst + d_len;
+
+	while (src < s_end && dst < d_end - 1) {
+		uchar_t *first = src;
+		uchar_t *len = dst++;
+		if (src[0] == 0) {
+			uchar_t *last = src + (256 - n);
+			while (src < MIN(last, s_end) && src[0] == 0)
+				src++;
+			*len = src - first - 1 + n;
+		} else {
+			uchar_t *last = src + n;
+			if (d_end - dst < n)
+				break;
+			while (src < MIN(last, s_end) - 1 && (src[0] | src[1]))
+				*dst++ = *src++;
+			if (src[0])
+				*dst++ = *src++;
+			*len = src - first - 1;
+		}
+	}
+	return (src == s_end ? dst - (uchar_t *)d_start : s_len);
+}
+
 /*
  * Most of what zle sees and cannot shrink is given up on here, before the
  * destination is touched: returning a borrowed buffer copies it back.
@@ -144,7 +206,22 @@ size_t
 zfs_zle_compress(abd_t *src, abd_t *dst, size_t s_len, size_t d_len, int n)
 {
 	void *s_buf = abd_borrow_buf_copy(src, s_len);
-	size_t c_len = zle_encode(s_buf, NULL, s_len, d_len, n);
+	size_t c_len;
+
+	if (zfs_zle_impl == 0) {
+		void *d_buf = abd_borrow_buf(dst, d_len);
+
+		c_len = zle_original(s_buf, d_buf, s_len, d_len, n);
+		abd_return_buf(src, s_buf, s_len);
+		abd_return_buf_copy(dst, d_buf, d_len);
+		return (c_len);
+	}
+	if (zfs_zle_impl == 2 && s_len >= ZLE_SAMPLE_MIN_BLOCK &&
+	    !zle_sample(s_buf, s_len)) {
+		abd_return_buf(src, s_buf, s_len);
+		return (s_len);
+	}
+	c_len = zle_encode(s_buf, NULL, s_len, d_len, n);
 
 	if (c_len == ZLE_NOFIT) {
 		c_len = s_len;
@@ -159,3 +236,6 @@ zfs_zle_compress(abd_t *src, abd_t *dst, size_t s_len, size_t d_len, int n)
 }
 
 ZFS_DECOMPRESS_WRAP_DECL(zfs_zle_decompress)
+
+ZFS_MODULE_PARAM(zfs, zfs_zle_, impl, UINT, ZMOD_RW,
+	"Measure only: 0 old, 1 pre-scan, 2 sampled");
