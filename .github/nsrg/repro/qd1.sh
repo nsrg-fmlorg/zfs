@@ -1,26 +1,26 @@
 #!/bin/sh
-# qd1.sh: recordsize against request size on a file, with and without
-# O_DIRECT, primarycache=metadata and direct=standard throughout.  Pool in
-# /dev/shm, fio randwrite QD=1, 10s, two rounds.  The recordsize limit is
-# zfs_max_recordsize, 16M by default here.
+# qd1.sh: what does dropping the ARC cost a volume when a write covers part
+# of a block?  /dev/shm hides the read of the old block, so the file vdev
+# sleeps per I/O, 80us read and 20us write, roughly an NVMe drive.
+# fio randwrite QD=1, 15s, three rounds.
 set -u
 OUT=/var/tmp/qd1
 HERE=$(pwd)
 mkdir -p "$OUT"
 P=/sys/module/zfs/parameters
 VOL=bench/vol
-DEV=/$VOL/file
+DEV=/dev/zvol/$VOL
 
 param() { echo "$2" | sudo tee "$P/$1" >/dev/null; }
 
-setup() { # setup <recordsize>
+setup() { # setup <primarycache> <volblocksize>
 	sudo truncate -s 6G /dev/shm/vdev
 	sudo "$HERE"/zpool create -f -O compression=off bench /dev/shm/vdev
-	sudo "$HERE"/zfs create -o recordsize="$1" -o primarycache=metadata \
+	sudo "$HERE"/zfs create -V 3G -b "$2" -o primarycache="$1" \
 	    -o direct=standard $VOL
-	got=$(sudo "$HERE"/zfs get -H -o value recordsize $VOL)
-	[ "$got" = "$(echo "$1" | tr a-z A-Z)" ] || { echo "recordsize $got, wanted $1"; exit 1; }
-	sudo dd if=/dev/urandom of=$DEV bs=1M count=3072 status=none
+	udevadm settle
+	sudo dd if=/dev/urandom of=$DEV bs=1M count=3072 oflag=direct \
+	    status=none
 	sudo "$HERE"/zpool sync bench
 }
 
@@ -47,9 +47,9 @@ arc() { # peak MiB of data_size, anon_size and arc size over the samples
 round() { # round <label> <bs> <sync> <odirect>
 	arc > "$OUT"/arc.txt &
 	ap=$!
-	sudo timeout 120 fio --name=w --filename=$DEV --direct="$4" \
+	sudo timeout 120 fio --name=w --filename=$DEV --direct=1 \
 	    --rw=randwrite --bs="$2" --sync="$3" --iodepth=1 --size=3G \
-	    --ioengine=libaio --randrepeat=0 --time_based --runtime=10 \
+	    --ioengine=libaio --randrepeat=0 --time_based --runtime=15 \
 	    --output-format=json > "$OUT"/fio.json
 	kill $ap
 	wait $ap 2>/dev/null
@@ -67,17 +67,32 @@ round() { # round <label> <bs> <sync> <odirect>
 param zfs_arc_max $((512 * 1024 * 1024))
 param zvol_request_sync 0
 
-sudo "$HERE"/zpool --version
-for v in 16k 64k 128k 1M 4M 4k; do
-	for b in 4k 16k 64k 128k 1M 4M; do
+misses() { awk '$1=="demand_data_misses"{print $3}' /proc/spl/kstat/zfs/arcstats; }
+
+case1() { # case1 <read_us> <write_us> <vbs> <bs> <sync> <primarycache>
+	param vdev_file_read_delay_us "$1"
+	param vdev_file_write_delay_us "$2"
+	l="r$1w$2/v$3/b$4/sync$5/$6"
+	setup "$6" "$3"
+	for r in 1 2 3; do
+		m0=$(misses)
+		round "$l" "$4" "$5" 1
+		echo "MISS $l $(($(misses) - m0))" | tee -a "$OUT"/miss.txt
+	done
+	teardown
+}
+
+# Control: the delay has to show, or nothing below measures it.
+for pc in all metadata; do
+	case1 0 0 16k 4k 0 $pc
+	case1 0 0 16k 16k 0 $pc
+done
+for v in 16k 64k 128k 1M; do
+	for b in 4k 16k 64k; do
+		case "$v/$b" in 16k/64k) continue;; esac
 		for s in 0 1; do
-			for d in 0 1; do
-				l="b$b/r$v/sync$s/odirect$d"
-				setup "$v"
-				for r in 1 2; do
-					round "$l" "$b" "$s" "$d"
-				done
-				teardown
+			for pc in all metadata; do
+				case1 80 20 $v $b $s $pc
 			done
 		done
 	done
@@ -93,4 +108,5 @@ done
 	    "$OUT"/raw.tsv | sort
 } > "$OUT"/summary.tsv
 sed 's/^/SUM /' "$OUT"/summary.tsv
+sed "s/^/SUM /" "$OUT"/miss.txt
 sudo chmod -R a+r "$OUT"

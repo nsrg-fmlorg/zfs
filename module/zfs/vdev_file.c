@@ -25,6 +25,9 @@
 #include <sys/fm/fs/zfs.h>
 #include <sys/abd.h>
 #include <sys/stat.h>
+#if defined(_KERNEL) && defined(__linux__)
+#include <linux/delay.h>
+#endif
 
 /*
  * Virtual device vector for files.
@@ -200,6 +203,9 @@ vdev_file_close(vdev_t *vd)
 	vd->vdev_tsd = NULL;
 }
 
+static uint_t vdev_file_read_delay_us = 0;
+static uint_t vdev_file_write_delay_us = 0;
+
 static void
 vdev_file_io_strategy(void *arg)
 {
@@ -211,6 +217,17 @@ vdev_file_io_strategy(void *arg)
 	loff_t off;
 	ssize_t size;
 	int err;
+
+#if defined(_KERNEL) && defined(__linux__)
+	/* Measurement only: stand in for a device's service time. */
+	if (zio->io_type == ZIO_TYPE_READ && vdev_file_read_delay_us != 0)
+		usleep_range(vdev_file_read_delay_us,
+		    vdev_file_read_delay_us + 5);
+	else if (zio->io_type == ZIO_TYPE_WRITE &&
+	    vdev_file_write_delay_us != 0)
+		usleep_range(vdev_file_write_delay_us,
+		    vdev_file_write_delay_us + 5);
+#endif
 
 	off = zio->io_offset;
 	size = zio->io_size;
@@ -363,6 +380,10 @@ vdev_ops_t vdev_disk_ops = {
 
 #endif
 
+ZFS_MODULE_PARAM(zfs_vdev_file, vdev_file_, read_delay_us, UINT, ZMOD_RW,
+	"Measurement: sleep per read");
+ZFS_MODULE_PARAM(zfs_vdev_file, vdev_file_, write_delay_us, UINT, ZMOD_RW,
+	"Measurement: sleep per write");
 ZFS_MODULE_PARAM(zfs_vdev_file, vdev_file_, logical_ashift, UINT, ZMOD_RW,
 	"Logical ashift for file-based devices");
 ZFS_MODULE_PARAM(zfs_vdev_file, vdev_file_, physical_ashift, UINT, ZMOD_RW,
