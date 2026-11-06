@@ -1,9 +1,10 @@
 #!/bin/sh
-# qd1.sh: what does dropping the ARC cost a volume when a write covers part
-# of a block?  /dev/shm hides the read of the old block, so the file vdev
-# sleeps per I/O, 80us read and 20us write, roughly an NVMe drive.
-# fio randwrite QD=1, 15s, three rounds.
+# qd1.sh: does the ARC pay for itself on partial writes once the writes have
+# locality?  File vdev sleeps 80us per read and 20us per write.  One warm
+# round, then three of 15s, fio randwrite QD=1, uniform and zipf.  MISS is
+# the pool read operations during a round.
 set -u
+RD=random
 OUT=/var/tmp/qd1
 HERE=$(pwd)
 mkdir -p "$OUT"
@@ -49,7 +50,7 @@ round() { # round <label> <bs> <sync> <odirect>
 	ap=$!
 	sudo timeout 120 fio --name=w --filename=$DEV --direct=1 \
 	    --rw=randwrite --bs="$2" --sync="$3" --iodepth=1 --size=3G \
-	    --ioengine=libaio --randrepeat=0 --time_based --runtime=15 \
+	    --ioengine=libaio --randrepeat=0 --random_distribution="$RD" --time_based --runtime=15 \
 	    --output-format=json > "$OUT"/fio.json
 	kill $ap
 	wait $ap 2>/dev/null
@@ -67,33 +68,30 @@ round() { # round <label> <bs> <sync> <odirect>
 param zfs_arc_max $((512 * 1024 * 1024))
 param zvol_request_sync 0
 
-misses() { awk '$1=="demand_data_misses"{print $3}' /proc/spl/kstat/zfs/arcstats; }
+misses() { sudo "$HERE"/zpool iostat -Hp bench | awk '{print $4}'; }
 
-case1() { # case1 <read_us> <write_us> <vbs> <bs> <sync> <primarycache>
-	param vdev_file_read_delay_us "$1"
-	param vdev_file_write_delay_us "$2"
-	l="r$1w$2/v$3/b$4/sync$5/$6"
-	setup "$6" "$3"
+case1() { # case1 <dist> <vbs> <bs> <primarycache>
+	RD=$1
+	param vdev_file_read_delay_us 80
+	param vdev_file_write_delay_us 20
+	l="$1/v$2/b$3/$4"
+	setup "$4" "$2"
+	# warm up, so the ARC holds what the distribution favours
+	round "warm/$l" "$3" 0 1
 	for r in 1 2 3; do
 		m0=$(misses)
-		round "$l" "$4" "$5" 1
+		round "$l" "$3" 0 1
 		echo "MISS $l $(($(misses) - m0))" | tee -a "$OUT"/miss.txt
 	done
 	teardown
 }
 
-# Control: the delay has to show, or nothing below measures it.
-for pc in all metadata; do
-	case1 0 0 16k 4k 0 $pc
-	case1 0 0 16k 16k 0 $pc
-done
-for v in 16k 64k 128k 1M; do
-	for b in 4k 16k 64k; do
-		case "$v/$b" in 16k/64k) continue;; esac
-		for s in 0 1; do
-			for pc in all metadata; do
-				case1 80 20 $v $b $s $pc
-			done
+for d in random zipf:1.2 zipf:0.8; do
+	for c in "16k 4k" "64k 4k" "64k 16k" "128k 4k" "128k 16k" \
+	    "16k 16k" "64k 64k"; do
+		set -- $c
+		for pc in all metadata; do
+			case1 $d $1 $2 $pc
 		done
 	done
 done
