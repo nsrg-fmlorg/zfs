@@ -1,26 +1,26 @@
 #!/bin/sh
-# qd1.sh: can a zvol keep the speed of buffered writes and the small ARC
-# of direct=always?  primarycache=metadata writes through the ARC and does
-# not keep the data.  Pool in /dev/shm, fio randwrite QD=1, 15s, two
-# rounds, every volblocksize against every request size.  arcstats are sampled each second during a round.
+# qd1.sh: recordsize against request size on a file, with and without
+# O_DIRECT, primarycache=metadata and direct=standard throughout.  Pool in
+# /dev/shm, fio randwrite QD=1, 10s, two rounds.  The recordsize limit is
+# zfs_max_recordsize, 16M by default here.
 set -u
 OUT=/var/tmp/qd1
 HERE=$(pwd)
 mkdir -p "$OUT"
 P=/sys/module/zfs/parameters
 VOL=bench/vol
-DEV=/dev/zvol/$VOL
+DEV=/$VOL/file
 
 param() { echo "$2" | sudo tee "$P/$1" >/dev/null; }
 
-setup() { # setup <direct> <primarycache> <volblocksize>
-	sudo truncate -s 5G /dev/shm/vdev
+setup() { # setup <recordsize>
+	sudo truncate -s 6G /dev/shm/vdev
 	sudo "$HERE"/zpool create -f -O compression=off bench /dev/shm/vdev
-	sudo "$HERE"/zfs create -V 3G -b "$3" -o direct="$1" \
-	    -o primarycache="$2" $VOL
-	udevadm settle
-	sudo dd if=/dev/urandom of=$DEV bs=1M count=3072 oflag=direct \
-	    status=none
+	sudo "$HERE"/zfs create -o recordsize="$1" -o primarycache=metadata \
+	    -o direct=standard $VOL
+	got=$(sudo "$HERE"/zfs get -H -o value recordsize $VOL)
+	[ "$got" = "$1" ] || { echo "recordsize $got, wanted $1"; exit 1; }
+	sudo dd if=/dev/urandom of=$DEV bs=1M count=3072 status=none
 	sudo "$HERE"/zpool sync bench
 }
 
@@ -44,12 +44,12 @@ arc() { # peak MiB of data_size, anon_size and arc size over the samples
 	done
 }
 
-round() { # round <label> <bs> <sync>
+round() { # round <label> <bs> <sync> <odirect>
 	arc > "$OUT"/arc.txt &
 	ap=$!
-	sudo timeout 120 fio --name=w --filename=$DEV --direct=1 \
+	sudo timeout 120 fio --name=w --filename=$DEV --direct="$4" \
 	    --rw=randwrite --bs="$2" --sync="$3" --iodepth=1 --size=3G \
-	    --ioengine=libaio --randrepeat=0 --time_based --runtime=15 \
+	    --ioengine=libaio --randrepeat=0 --time_based --runtime=10 \
 	    --output-format=json > "$OUT"/fio.json
 	kill $ap
 	wait $ap 2>/dev/null
@@ -67,14 +67,15 @@ round() { # round <label> <bs> <sync>
 param zfs_arc_max $((512 * 1024 * 1024))
 param zvol_request_sync 0
 
-for v in 4k 16k 64k 128k 1M; do
-	for b in 4k 16k 64k 128k 256k 1M; do
+sudo "$HERE"/zpool --version
+for v in 16k 64k 128k 1M 4M 4k; do
+	for b in 4k 16k 64k 128k 1M 4M; do
 		for s in 0 1; do
-			for d in always standard; do
-				l="b$b/v$v/sync$s/$d"
-				setup "$d" metadata "$v"
+			for d in 0 1; do
+				l="b$b/r$v/sync$s/odirect$d"
+				setup "$v"
 				for r in 1 2; do
-					round "$l" "$b" "$s"
+					round "$l" "$b" "$s" "$d"
 				done
 				teardown
 			done
