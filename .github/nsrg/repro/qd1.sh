@@ -1,8 +1,8 @@
 #!/bin/sh
 # qd1.sh: can a zvol keep the speed of buffered writes and the small ARC
 # of direct=always?  primarycache=metadata writes through the ARC and does
-# not keep the data.  Pool in /dev/shm, fio randwrite QD=1, 15s, three
-# rounds.  arcstats are sampled each second during a round.
+# not keep the data.  Pool in /dev/shm, fio randwrite QD=1, 15s, two
+# rounds, every volblocksize against every request size.  arcstats are sampled each second during a round.
 set -u
 OUT=/var/tmp/qd1
 HERE=$(pwd)
@@ -67,19 +67,17 @@ round() { # round <label> <bs> <sync>
 param zfs_arc_max $((512 * 1024 * 1024))
 param zvol_request_sync 0
 
-for t in "4k 4k" "16k 16k" "128k 128k" "128k 1M"; do
-	set -- $t
-	v=$1 b=$2
-	for s in 0 1; do
-		for c in "standard all" "standard metadata" "always all" \
-		    "always metadata"; do
-			set -- $c
-			l="$b/v$v/sync$s/$1/$2"
-			setup "$1" "$2" "$v"
-			for r in 1 2 3; do
-				round "$l" "$b" "$s"
+for v in 4k 16k 64k 128k 1M; do
+	for b in 4k 16k 64k 128k 256k 1M; do
+		for s in 0 1; do
+			for d in always standard; do
+				l="b$b/v$v/sync$s/$d"
+				setup "$d" metadata "$v"
+				for r in 1 2; do
+					round "$l" "$b" "$s"
+				done
+				teardown
 			done
-			teardown
 		done
 	done
 done
