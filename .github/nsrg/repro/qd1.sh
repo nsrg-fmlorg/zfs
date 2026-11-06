@@ -19,7 +19,7 @@ setup() { # setup <recordsize>
 	sudo "$HERE"/zfs create -o recordsize="$1" -o primarycache=metadata \
 	    -o direct=standard $VOL
 	got=$(sudo "$HERE"/zfs get -H -o value recordsize $VOL)
-	[ "$got" = "$1" ] || { echo "recordsize $got, wanted $1"; exit 1; }
+	[ "$got" = "$(echo "$1" | tr a-z A-Z)" ] || { echo "recordsize $got, wanted $1"; exit 1; }
 	sudo dd if=/dev/urandom of=$DEV bs=1M count=3072 status=none
 	sudo "$HERE"/zpool sync bench
 }
